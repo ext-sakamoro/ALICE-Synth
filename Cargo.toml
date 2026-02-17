@@ -1,0 +1,38 @@
+[package]
+name = "alice-synth"
+version = "0.1.0"
+edition = "2021"
+authors = ["Moroya Sakamoto"]
+description = "Procedural Audio Synthesizer — Don't send waveforms, send the score"
+license = "MIT"
+repository = "https://github.com/ext-sakamoro/ALICE-Synth"
+keywords = ["audio", "synthesizer", "procedural", "no_std", "fm-synthesis"]
+categories = ["multimedia::audio", "no-std", "embedded"]
+readme = "README.md"
+
+[lib]
+name = "alice_synth"
+path = "src/lib.rs"
+
+[features]
+default = []
+std = []
+midi = ["std"]                    # MIDI file import/export
+streaming = ["std"]               # ALICE Streaming Protocol integration (future)
+animation = ["std"]               # ALICE-Animation lip-sync bridge
+
+[dependencies]
+# libasp = { path = "../ALICE-Streaming-Protocol", optional = true, default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
