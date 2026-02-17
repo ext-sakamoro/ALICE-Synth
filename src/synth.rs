@@ -368,7 +368,7 @@ fn render_wavetable_voice(voice: &mut Voice, patch: &WavetablePatch, sample_rate
 mod tests {
     use super::*;
     use crate::patch::FmPatch;
-    use crate::score::{NoteEventKind, Score};
+    use crate::score::{NoteEvent, NoteEventKind, Score};
 
     #[test]
     fn test_synth_basic() {
