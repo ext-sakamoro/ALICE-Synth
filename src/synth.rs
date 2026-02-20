@@ -238,11 +238,11 @@ impl Synthesizer {
 
     /// Advance score sequencer by one sample
     fn advance_score(&mut self) {
-        if self.score.is_none() {
+        let Some(score) = self.score.as_ref() else {
             return;
-        }
+        };
 
-        let event_count = self.score.as_ref().unwrap().events.len();
+        let event_count = score.events.len();
         if self.score_event_idx >= event_count {
             return;
         }
@@ -252,7 +252,7 @@ impl Synthesizer {
 
         // Process events whose delta has elapsed
         while self.score_event_idx < event_count {
-            let event = self.score.as_ref().unwrap().events[self.score_event_idx];
+            let event = self.score.as_ref().expect("score checked above").events[self.score_event_idx];
             if (event.delta_tick as f32) > ticks_elapsed {
                 break;
             }
