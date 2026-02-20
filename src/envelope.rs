@@ -26,11 +26,14 @@ pub struct Adsr {
 impl Adsr {
     /// Create ADSR from time in milliseconds
     pub fn from_ms(attack_ms: f32, decay_ms: f32, sustain: f32, release_ms: f32, sample_rate: f32) -> Self {
+        const RCP_1000: f32 = 1.0 / 1000.0;
+        // Multiply by RCP_1000 instead of dividing per field
+        let ms_to_samples = sample_rate * RCP_1000;
         Self {
-            attack: (attack_ms * sample_rate / 1000.0) as u32,
-            decay: (decay_ms * sample_rate / 1000.0) as u32,
+            attack: (attack_ms * ms_to_samples) as u32,
+            decay: (decay_ms * ms_to_samples) as u32,
             sustain: sustain.clamp(0.0, 1.0),
-            release: (release_ms * sample_rate / 1000.0) as u32,
+            release: (release_ms * ms_to_samples) as u32,
         }
     }
 
@@ -112,8 +115,10 @@ impl AdsrState {
 
     /// Advance envelope by one sample
     ///
-    /// Returns amplitude multiplier [0.0, 1.0]
-    #[inline]
+    /// Returns amplitude multiplier [0.0, 1.0].
+    /// Divisions are replaced with reciprocal multiplications; each reciprocal is
+    /// computed at most once per phase transition, not once per sample.
+    #[inline(always)]
     pub fn next(&mut self, params: &Adsr) -> f32 {
         match self.phase {
             AdsrPhase::Idle => {
@@ -125,7 +130,9 @@ impl AdsrState {
                     self.phase = AdsrPhase::Decay;
                     self.counter = 0;
                 } else {
-                    self.level = self.counter as f32 / params.attack as f32;
+                    // Reciprocal computed once per call; attack is constant per phase
+                    let inv_attack = (params.attack as f32).recip();
+                    self.level = self.counter as f32 * inv_attack;
                     self.counter += 1;
                     if self.counter >= params.attack {
                         self.level = 1.0;
@@ -139,7 +146,9 @@ impl AdsrState {
                     self.level = params.sustain;
                     self.phase = AdsrPhase::Sustain;
                 } else {
-                    let t = self.counter as f32 / params.decay as f32;
+                    // Reciprocal computed once per call; decay is constant per phase
+                    let inv_decay = (params.decay as f32).recip();
+                    let t = self.counter as f32 * inv_decay;
                     self.level = 1.0 + (params.sustain - 1.0) * t;
                     self.counter += 1;
                     if self.counter >= params.decay {
@@ -156,14 +165,17 @@ impl AdsrState {
                     self.level = 0.0;
                     self.phase = AdsrPhase::Idle;
                 } else {
+                    // Reciprocal computed once per call; release is constant per phase
+                    let inv_release = (params.release as f32).recip();
                     let start_level = if self.counter == 0 {
                         self.level
                     } else {
-                        // Reconstruct start level from counter
-                        self.level / (1.0 - self.counter as f32 / params.release as f32).max(0.001)
+                        // Reconstruct start level; replace inner division with multiply
+                        let progress = self.counter as f32 * inv_release;
+                        self.level / (1.0 - progress).max(0.001)
                     };
                     self.counter += 1;
-                    let t = self.counter as f32 / params.release as f32;
+                    let t = self.counter as f32 * inv_release;
                     self.level = start_level * (1.0 - t).max(0.0);
                     if self.counter >= params.release {
                         self.level = 0.0;

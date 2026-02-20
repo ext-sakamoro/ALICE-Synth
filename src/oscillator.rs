@@ -7,8 +7,17 @@
 
 use core::f32::consts::PI;
 
+/// 2*pi — avoid repeated 2.0 * PI multiplications in hot paths
+const TWO_PI: f32 = 2.0 * PI;
+
+/// Reciprocal of 32768 — noise normalization, avoids per-sample division
+const RCP_32768: f32 = 1.0 / 32768.0;
+
+/// Reciprocal of 12 — used in midi_to_freq semitone conversion
+const RCP_12: f32 = 1.0 / 12.0;
+
 /// no_std-compatible floor function
-#[inline]
+#[inline(always)]
 fn floor_f32(x: f32) -> f32 {
     let i = x as i32;
     let f = i as f32;
@@ -68,37 +77,40 @@ impl Oscillator {
 
     /// Generate next sample at given frequency
     ///
-    /// `freq_hz`: oscillator frequency
-    /// `sample_rate`: audio sample rate (e.g. 44100)
+    /// `freq_hz`: oscillator frequency in Hz
+    /// `inv_sample_rate`: pre-computed `1.0 / sample_rate` — caller must hoist
+    ///   this outside any per-sample loop to eliminate the division from the hot path
     ///
     /// Returns sample in [-1.0, 1.0]
-    #[inline]
-    pub fn next_sample(&mut self, freq_hz: f32, sample_rate: f32) -> f32 {
+    #[inline(always)]
+    pub fn next_sample(&mut self, freq_hz: f32, inv_sample_rate: f32) -> f32 {
         let out = self.sample_at_phase(self.phase);
-        self.phase += freq_hz / sample_rate;
-        // Wrap phase — branchless via fractional part
+        self.phase += freq_hz * inv_sample_rate;
+        // Wrap phase — branchless via fractional subtraction
         self.phase -= floor_f32(self.phase);
         out
     }
 
     /// Generate sample with phase modulation (for FM synthesis)
     ///
-    /// `phase_mod`: additional phase offset from modulator
-    #[inline]
-    pub fn next_sample_fm(&mut self, freq_hz: f32, sample_rate: f32, phase_mod: f32) -> f32 {
+    /// `freq_hz`: oscillator frequency in Hz
+    /// `inv_sample_rate`: pre-computed `1.0 / sample_rate`
+    /// `phase_mod`: additional phase offset from modulator oscillator
+    #[inline(always)]
+    pub fn next_sample_fm(&mut self, freq_hz: f32, inv_sample_rate: f32, phase_mod: f32) -> f32 {
         let mod_phase = self.phase + phase_mod;
         let mod_phase = mod_phase - floor_f32(mod_phase);
         let out = self.sample_at_phase(mod_phase);
-        self.phase += freq_hz / sample_rate;
+        self.phase += freq_hz * inv_sample_rate;
         self.phase -= floor_f32(self.phase);
         out
     }
 
     /// Evaluate waveform at given phase [0.0, 1.0)
-    #[inline]
+    #[inline(always)]
     fn sample_at_phase(&mut self, phase: f32) -> f32 {
         match self.waveform {
-            Waveform::Sine => sin_approx(phase * 2.0 * PI),
+            Waveform::Sine => sin_approx(phase * TWO_PI),
             Waveform::Saw => 2.0 * phase - 1.0,
             Waveform::Square => {
                 if phase < 0.5 {
@@ -115,13 +127,13 @@ impl Oscillator {
                 }
             }
             Waveform::Noise => {
-                // 16-bit LFSR noise
+                // 16-bit LFSR noise; RCP_32768 replaces the / 32768.0 division
                 let bit = ((self.noise_state >> 0) ^ (self.noise_state >> 2)
                     ^ (self.noise_state >> 3)
                     ^ (self.noise_state >> 5))
                     & 1;
                 self.noise_state = (self.noise_state >> 1) | (bit << 15);
-                (self.noise_state as f32 / 32768.0) * 2.0 - 1.0
+                (self.noise_state as f32 * RCP_32768) * 2.0 - 1.0
             }
         }
     }
@@ -130,11 +142,13 @@ impl Oscillator {
 /// Fast sine approximation (Bhaskara I, ~0.1% error)
 ///
 /// Avoids libm dependency for no_std targets.
-#[inline]
+/// The rational division is unavoidable (one div per call), but TWO_PI
+/// is a constant so no runtime multiply is needed for normalization.
+#[inline(always)]
 pub fn sin_approx(x: f32) -> f32 {
     // Normalize to [0, 2π)
-    let x = x % (2.0 * PI);
-    let x = if x < 0.0 { x + 2.0 * PI } else { x };
+    let x = x % TWO_PI;
+    let x = if x < 0.0 { x + TWO_PI } else { x };
 
     // Map to [0, π] with sign
     let (x, sign) = if x > PI { (x - PI, -1.0) } else { (x, 1.0) };
@@ -148,15 +162,16 @@ pub fn sin_approx(x: f32) -> f32 {
 /// Convert MIDI note number to frequency (Hz)
 ///
 /// A4 (note 69) = 440 Hz
-#[inline]
+/// RCP_12 replaces the / 12.0 division in semitone computation.
+#[inline(always)]
 pub fn midi_to_freq(note: u8) -> f32 {
-    440.0 * pow2_approx((note as f32 - 69.0) / 12.0)
+    440.0 * pow2_approx((note as f32 - 69.0) * RCP_12)
 }
 
 /// Fast 2^x approximation for no_std
 ///
-/// Uses integer bit manipulation + linear interpolation.
-#[inline]
+/// Uses integer bit manipulation + polynomial approximation.
+#[inline(always)]
 fn pow2_approx(x: f32) -> f32 {
     // 2^x = 2^int(x) * 2^frac(x)
     let floor = floor_f32(x);
@@ -166,7 +181,7 @@ fn pow2_approx(x: f32) -> f32 {
     // 2^frac approximation (linear: good enough for ±6 semitones)
     let frac_approx = 1.0 + frac * (0.6931472 + frac * (0.2402265 + frac * 0.0558011));
 
-    // 2^int via IEEE 754 exponent manipulation
+    // 2^int via IEEE 754 exponent field manipulation
     let bits = ((127 + int_part) as u32) << 23;
     let int_pow = f32::from_bits(bits);
 
@@ -192,9 +207,10 @@ mod tests {
     #[test]
     fn test_oscillator_sine() {
         let mut osc = Oscillator::new(Waveform::Sine);
+        let inv_sr = 1.0_f32 / 44100.0;
         let mut samples = [0.0f32; 100];
         for s in samples.iter_mut() {
-            *s = osc.next_sample(440.0, 44100.0);
+            *s = osc.next_sample(440.0, inv_sr);
         }
         // First sample should be near zero (sin(0))
         assert!(samples[0].abs() < 0.1);
@@ -205,7 +221,8 @@ mod tests {
     #[test]
     fn test_oscillator_saw() {
         let mut osc = Oscillator::new(Waveform::Saw);
-        let sample = osc.next_sample(1.0, 4.0); // phase=0 → saw=-1
+        let inv_sr = 1.0_f32 / 4.0;
+        let sample = osc.next_sample(1.0, inv_sr); // phase=0 → saw=-1
         assert!((sample - (-1.0)).abs() < 0.01);
     }
 
@@ -221,9 +238,10 @@ mod tests {
     #[test]
     fn test_oscillator_noise() {
         let mut osc = Oscillator::new(Waveform::Noise);
+        let inv_sr = 1.0_f32 / 44100.0;
         let mut samples = [0.0f32; 100];
         for s in samples.iter_mut() {
-            *s = osc.next_sample(44100.0, 44100.0);
+            *s = osc.next_sample(44100.0, inv_sr);
         }
         // Noise should have variety
         let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);

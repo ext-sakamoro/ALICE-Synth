@@ -46,7 +46,8 @@ impl Delay {
 
     /// Create delay from milliseconds
     pub fn from_ms(delay_ms: f32, sample_rate: f32, feedback: f32, mix: f32) -> Self {
-        let samples = (delay_ms * sample_rate / 1000.0) as usize;
+        const RCP_1000: f32 = 1.0 / 1000.0;
+        let samples = (delay_ms * sample_rate * RCP_1000) as usize;
         Self::new(samples, feedback, mix)
     }
 }
@@ -78,23 +79,25 @@ pub struct LowPassFilter {
 
 impl LowPassFilter {
     /// Create from cutoff frequency
+    #[inline(always)]
     pub fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
-        let rc = 1.0 / (2.0 * core::f32::consts::PI * cutoff_hz);
-        let dt = 1.0 / sample_rate;
+        let rc = (2.0 * core::f32::consts::PI * cutoff_hz).recip();
+        let dt = sample_rate.recip();
         let alpha = dt / (rc + dt);
         Self { alpha, prev: 0.0 }
     }
 
     /// Set cutoff frequency
+    #[inline(always)]
     pub fn set_cutoff(&mut self, cutoff_hz: f32, sample_rate: f32) {
-        let rc = 1.0 / (2.0 * core::f32::consts::PI * cutoff_hz);
-        let dt = 1.0 / sample_rate;
+        let rc = (2.0 * core::f32::consts::PI * cutoff_hz).recip();
+        let dt = sample_rate.recip();
         self.alpha = dt / (rc + dt);
     }
 }
 
 impl Effect for LowPassFilter {
-    #[inline]
+    #[inline(always)]
     fn process(&mut self, input: f32) -> f32 {
         self.prev = self.alpha * input + (1.0 - self.alpha) * self.prev;
         self.prev
@@ -120,7 +123,7 @@ pub struct StateVariableFilter {
 
 impl StateVariableFilter {
     pub fn new(cutoff_hz: f32, resonance: f32, sample_rate: f32) -> Self {
-        let f = 2.0 * sin_approx(core::f32::consts::PI * cutoff_hz / sample_rate);
+        let f = 2.0 * sin_approx(core::f32::consts::PI * cutoff_hz * sample_rate.recip());
         let damp = (1.0 - resonance.clamp(0.0, 0.99)).max(0.01);
         Self {
             f,
@@ -131,6 +134,7 @@ impl StateVariableFilter {
     }
 
     /// Process and return (low, band, high) simultaneously
+    #[inline(always)]
     pub fn process_svf(&mut self, input: f32) -> (f32, f32, f32) {
         let high = input - self.low - self.damp * self.band;
         self.band += self.f * high;
@@ -138,12 +142,14 @@ impl StateVariableFilter {
         (self.low, self.band, high)
     }
 
+    #[inline(always)]
     pub fn set_cutoff(&mut self, cutoff_hz: f32, sample_rate: f32) {
-        self.f = 2.0 * sin_approx(core::f32::consts::PI * cutoff_hz / sample_rate);
+        self.f = 2.0 * sin_approx(core::f32::consts::PI * cutoff_hz * sample_rate.recip());
     }
 }
 
 impl Effect for StateVariableFilter {
+    #[inline(always)]
     fn process(&mut self, input: f32) -> f32 {
         self.process_svf(input).0 // Low-pass by default
     }
@@ -172,13 +178,16 @@ impl Reverb {
         let base_delays = [1116, 1188, 1277, 1356]; // Schroeder delays
         let allpass_delays = [556, 441];
 
+        const RCP_44100: f32 = 1.0 / 44100.0;
         let scale = room_size.clamp(0.1, 2.0);
+        // Multiply by RCP_44100 instead of dividing by 44100 — both computed once at init
+        let scale_sr = scale * sample_rate * RCP_44100;
         let comb_buffers = base_delays.map(|d| {
-            let size = (d as f32 * scale * sample_rate / 44100.0) as usize;
+            let size = (d as f32 * scale_sr) as usize;
             vec![0.0f32; size.max(1)]
         });
         let allpass_buffers = allpass_delays.map(|d| {
-            let size = (d as f32 * scale * sample_rate / 44100.0) as usize;
+            let size = (d as f32 * scale_sr) as usize;
             vec![0.0f32; size.max(1)]
         });
 

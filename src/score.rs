@@ -25,8 +25,10 @@ impl ScoreHeader {
     pub const MAGIC: [u8; 4] = *b"ASYN";
 
     /// Ticks per second at current tempo
+    #[inline(always)]
     pub fn ticks_per_second(&self) -> f32 {
-        self.tempo_bpm as f32 / 60.0 * self.tick_div as f32
+        const RCP_60: f32 = 1.0 / 60.0;
+        self.tempo_bpm as f32 * RCP_60 * self.tick_div as f32
     }
 
     /// Samples per tick at given sample rate
@@ -188,8 +190,14 @@ impl Score {
     }
 
     /// Total duration in seconds
+    #[inline(always)]
     pub fn duration_secs(&self) -> f32 {
-        self.total_ticks() as f32 / self.header.ticks_per_second()
+        let tps = self.header.ticks_per_second();
+        if tps > 0.0 {
+            self.total_ticks() as f32 * tps.recip()
+        } else {
+            0.0
+        }
     }
 }
 

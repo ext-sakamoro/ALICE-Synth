@@ -20,6 +20,8 @@ use crate::effects::{Effect, StateVariableFilter};
 const MAX_VOICES: usize = 64;
 /// Maximum instrument channels
 const MAX_CHANNELS: usize = 16;
+/// Reciprocal of MIDI velocity range (127) — avoids per-note-on division
+const RCP_127: f32 = 1.0 / 127.0;
 
 /// Single voice state
 pub struct Voice {
@@ -68,7 +70,7 @@ impl Voice {
         self.active = true;
         self.note = note;
         self.channel = channel;
-        self.velocity = velocity as f32 / 127.0;
+        self.velocity = velocity as f32 * RCP_127;
         self.freq_hz = midi_to_freq(note);
         self.osc.reset();
         self.mod_osc.reset();
@@ -88,6 +90,8 @@ impl Voice {
 pub struct Synthesizer {
     /// Audio sample rate
     sample_rate: f32,
+    /// Pre-computed reciprocal of sample_rate — eliminates per-sample divisions
+    inv_sample_rate: f32,
     /// Voice pool
     voices: Vec<Voice>,
     /// Instrument patches per channel
@@ -102,6 +106,8 @@ pub struct Synthesizer {
     tick_accum: f32,
     /// Samples per tick (computed from score header)
     samples_per_tick: f32,
+    /// Pre-computed reciprocal of samples_per_tick — avoids per-sample division in sequencer
+    inv_samples_per_tick: f32,
 }
 
 impl Synthesizer {
@@ -114,8 +120,10 @@ impl Synthesizer {
         for _ in 0..MAX_CHANNELS {
             patches.push(None);
         }
+        let sr = sample_rate as f32;
         Self {
-            sample_rate: sample_rate as f32,
+            sample_rate: sr,
+            inv_sample_rate: sr.recip(),
             voices,
             patches,
             master_volume: 0.8,
@@ -123,6 +131,7 @@ impl Synthesizer {
             score_event_idx: 0,
             tick_accum: 0.0,
             samples_per_tick: 0.0,
+            inv_samples_per_tick: 0.0,
         }
     }
 
@@ -135,7 +144,10 @@ impl Synthesizer {
 
     /// Load a score for playback
     pub fn load_score(&mut self, score: &Score) {
-        self.samples_per_tick = score.header.samples_per_tick(self.sample_rate);
+        let spt = score.header.samples_per_tick(self.sample_rate);
+        self.samples_per_tick = spt;
+        // Pre-compute reciprocal so advance_score multiplies instead of divides
+        self.inv_samples_per_tick = if spt > 0.0 { spt.recip() } else { 0.0 };
         self.score = Some(score.clone());
         self.score_event_idx = 0;
         self.tick_accum = 0.0;
@@ -174,6 +186,10 @@ impl Synthesizer {
     ///
     /// Returns number of samples written.
     pub fn render(&mut self, buffer: &mut [f32]) -> usize {
+        // Hoist inv_sample_rate: shared across all voices and all samples in this call
+        let inv_sr = self.inv_sample_rate;
+        let sr = self.sample_rate;
+
         for sample in buffer.iter_mut() {
             // Advance score sequencer
             self.advance_score();
@@ -186,15 +202,15 @@ impl Synthesizer {
                 }
                 let ch = voice.channel as usize;
                 let s = match self.patches.get(ch).and_then(|p| p.as_ref()) {
-                    Some(Patch::Fm(ref fm)) => render_fm_voice(voice, fm, self.sample_rate),
+                    Some(Patch::Fm(ref fm)) => render_fm_voice(voice, fm, inv_sr),
                     Some(Patch::Additive(ref add)) => {
-                        render_additive_voice(voice, add, self.sample_rate)
+                        render_additive_voice(voice, add, sr, inv_sr)
                     }
                     Some(Patch::Subtractive(ref sub)) => {
-                        render_subtractive_voice(voice, sub, self.sample_rate)
+                        render_subtractive_voice(voice, sub, sr, inv_sr)
                     }
                     Some(Patch::Wavetable(ref wt)) => {
-                        render_wavetable_voice(voice, wt, self.sample_rate)
+                        render_wavetable_voice(voice, wt, inv_sr)
                     }
                     None => {
                         // Default: simple sine
@@ -204,7 +220,7 @@ impl Synthesizer {
                             sustain: 0.5,
                             release: 2000,
                         });
-                        let s = voice.osc.next_sample(voice.freq_hz, self.sample_rate);
+                        let s = voice.osc.next_sample(voice.freq_hz, inv_sr);
                         s * env * voice.velocity
                     }
                 };
@@ -248,7 +264,8 @@ impl Synthesizer {
         }
 
         self.tick_accum += 1.0;
-        let ticks_elapsed = self.tick_accum / self.samples_per_tick;
+        // Multiply by pre-computed reciprocal instead of dividing per sample
+        let ticks_elapsed = self.tick_accum * self.inv_samples_per_tick;
 
         // Process events whose delta has elapsed
         while self.score_event_idx < event_count {
@@ -299,26 +316,40 @@ impl Synthesizer {
 }
 
 /// Render one sample from an FM voice
-fn render_fm_voice(voice: &mut Voice, patch: &FmPatch, sample_rate: f32) -> f32 {
+///
+/// `inv_sample_rate`: pre-computed `1.0 / sample_rate`
+#[inline(always)]
+fn render_fm_voice(voice: &mut Voice, patch: &FmPatch, inv_sample_rate: f32) -> f32 {
     // Simple 2-op FM: operator[1] modulates operator[0]
     let op1 = &patch.operators[1];
     let op0 = &patch.operators[0];
 
     let mod_env = voice.mod_env.next(&op1.envelope);
     let mod_freq = voice.freq_hz * op1.ratio;
-    let mod_sample = voice.mod_osc.next_sample(mod_freq, sample_rate);
+    let mod_sample = voice.mod_osc.next_sample(mod_freq, inv_sample_rate);
     let phase_mod = mod_sample * op1.mod_index * mod_env;
 
     let carrier_env = voice.amp_env.next(&op0.envelope);
     let carrier_freq = voice.freq_hz * op0.ratio;
-    let carrier = voice.osc.next_sample_fm(carrier_freq, sample_rate, phase_mod);
+    let carrier = voice.osc.next_sample_fm(carrier_freq, inv_sample_rate, phase_mod);
 
     carrier * carrier_env * voice.velocity * op0.level
 }
 
 /// Render one sample from an additive voice
-fn render_additive_voice(voice: &mut Voice, patch: &AdditivePatch, sample_rate: f32) -> f32 {
+///
+/// `sample_rate`: used for Nyquist check (compare, not divide)
+/// `inv_sample_rate`: pre-computed `1.0 / sample_rate` for oscillator phase step
+#[inline(always)]
+fn render_additive_voice(
+    voice: &mut Voice,
+    patch: &AdditivePatch,
+    sample_rate: f32,
+    inv_sample_rate: f32,
+) -> f32 {
     let env = voice.amp_env.next(&patch.envelope);
+    // Nyquist limit: half of sample_rate; pre-multiply once
+    let nyquist = sample_rate * 0.5;
     let mut sum = 0.0f32;
     for (i, &amp) in patch.harmonics.iter().enumerate() {
         if amp < 0.001 {
@@ -326,25 +357,34 @@ fn render_additive_voice(voice: &mut Voice, patch: &AdditivePatch, sample_rate: 
         }
         let harmonic = (i + 1) as f32;
         let freq = voice.freq_hz * harmonic;
-        if freq > sample_rate * 0.5 {
+        if freq > nyquist {
             break; // Nyquist limit
         }
         // Use main osc phase as base, compute harmonic phase
-        let phase = voice.osc.next_sample(freq, sample_rate);
+        let phase = voice.osc.next_sample(freq, inv_sample_rate);
         sum += phase * amp;
     }
     // Advance base oscillator for phase tracking
-    let _ = voice.osc.next_sample(voice.freq_hz, sample_rate);
+    let _ = voice.osc.next_sample(voice.freq_hz, inv_sample_rate);
     sum * env * voice.velocity
 }
 
 /// Render one sample from a subtractive voice
-fn render_subtractive_voice(voice: &mut Voice, patch: &SubtractivePatch, sample_rate: f32) -> f32 {
+///
+/// `sample_rate`: used for filter Nyquist clamp
+/// `inv_sample_rate`: pre-computed `1.0 / sample_rate` for oscillator phase step
+#[inline(always)]
+fn render_subtractive_voice(
+    voice: &mut Voice,
+    patch: &SubtractivePatch,
+    sample_rate: f32,
+    inv_sample_rate: f32,
+) -> f32 {
     let amp_env = voice.amp_env.next(&patch.amp_envelope);
     let filter_env = voice.filter_env.next(&patch.filter_envelope);
 
     // Oscillator
-    let raw = voice.osc.next_sample(voice.freq_hz, sample_rate);
+    let raw = voice.osc.next_sample(voice.freq_hz, inv_sample_rate);
 
     // Filter with envelope modulation
     let cutoff = patch.cutoff_hz + filter_env * patch.filter_env_amount * 10000.0;
@@ -355,9 +395,12 @@ fn render_subtractive_voice(voice: &mut Voice, patch: &SubtractivePatch, sample_
 }
 
 /// Render one sample from a wavetable voice
-fn render_wavetable_voice(voice: &mut Voice, patch: &WavetablePatch, sample_rate: f32) -> f32 {
+///
+/// `inv_sample_rate`: pre-computed `1.0 / sample_rate`
+#[inline(always)]
+fn render_wavetable_voice(voice: &mut Voice, patch: &WavetablePatch, inv_sample_rate: f32) -> f32 {
     let env = voice.amp_env.next(&patch.envelope);
-    let sample = voice.osc.next_sample(voice.freq_hz, sample_rate);
+    let sample = voice.osc.next_sample(voice.freq_hz, inv_sample_rate);
     // Map oscillator output [-1,1] to phase [0,1]
     let phase = (sample + 1.0) * 0.5;
     let wt_sample = patch.lookup(phase);
