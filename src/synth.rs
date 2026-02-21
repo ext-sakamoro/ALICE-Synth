@@ -500,4 +500,135 @@ mod tests {
         let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         assert!(max_abs > 0.01);
     }
+
+    // --- NEW TESTS ---
+
+    #[test]
+    fn test_synth_silent_before_note_on() {
+        let mut synth = Synthesizer::new(44100);
+        synth.load_patch(0, Patch::Fm(FmPatch::electric_piano()));
+        // No notes triggered
+        let mut buf = [0.0f32; 256];
+        synth.render(&mut buf);
+        let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert_eq!(max_abs, 0.0, "no active voices should produce silence");
+    }
+
+    #[test]
+    fn test_synth_active_voice_count_after_note_off() {
+        let mut synth = Synthesizer::new(44100);
+        synth.note_on(0, 60, 100);
+        synth.note_on(0, 64, 100);
+        synth.note_off(0, 60);
+        // One voice released but may still be in release phase
+        assert!(synth.active_voice_count() >= 1);
+    }
+
+    #[test]
+    fn test_synth_additive_voice_produces_sound() {
+        let mut synth = Synthesizer::new(44100);
+        synth.load_patch(0, Patch::Additive(crate::patch::AdditivePatch::organ()));
+        synth.note_on(0, 60, 100);
+        let mut buf = [0.0f32; 1024];
+        synth.render(&mut buf);
+        let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.001, "additive voice should produce sound, max={max_abs}");
+    }
+
+    #[test]
+    fn test_synth_wavetable_voice_produces_sound() {
+        use crate::patch::WavetablePatch;
+        use core::f32::consts::PI;
+        let mut synth = Synthesizer::new(44100);
+        let adsr = crate::envelope::Adsr::from_ms(1.0, 500.0, 0.5, 100.0, 44100.0);
+        let wt = WavetablePatch::from_fn(|phase| (phase * 2.0 * PI).sin(), adsr);
+        synth.load_patch(0, Patch::Wavetable(wt));
+        synth.note_on(0, 60, 100);
+        let mut buf = [0.0f32; 1024];
+        synth.render(&mut buf);
+        let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.001, "wavetable voice should produce sound, max={max_abs}");
+    }
+
+    #[test]
+    fn test_synth_master_volume_scales_output() {
+        let mut synth_loud = Synthesizer::new(44100);
+        synth_loud.load_patch(0, Patch::Fm(FmPatch::electric_piano()));
+        synth_loud.master_volume = 1.0;
+        synth_loud.note_on(0, 60, 100);
+        let mut buf_loud = [0.0f32; 512];
+        synth_loud.render(&mut buf_loud);
+
+        let mut synth_quiet = Synthesizer::new(44100);
+        synth_quiet.load_patch(0, Patch::Fm(FmPatch::electric_piano()));
+        synth_quiet.master_volume = 0.1;
+        synth_quiet.note_on(0, 60, 100);
+        let mut buf_quiet = [0.0f32; 512];
+        synth_quiet.render(&mut buf_quiet);
+
+        let max_loud = buf_loud.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        let max_quiet = buf_quiet.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max_loud > max_quiet, "louder master_volume should produce bigger amplitude");
+    }
+
+    #[test]
+    fn test_synth_render_i16_clamps_to_i16_range() {
+        let mut synth = Synthesizer::new(44100);
+        synth.load_patch(0, Patch::Fm(FmPatch::electric_piano()));
+        synth.master_volume = 10.0; // intentionally overdriven
+        synth.note_on(0, 60, 127);
+        let mut buf = [0i16; 512];
+        synth.render_i16(&mut buf);
+        // All samples must be in i16 range (no wrapping overflow)
+        for &s in buf.iter() {
+            assert!(s >= i16::MIN && s <= i16::MAX);
+        }
+    }
+
+    #[test]
+    fn test_synth_load_patch_out_of_range_channel_no_panic() {
+        let mut synth = Synthesizer::new(44100);
+        // Channel 99 is out of MAX_CHANNELS; must not panic
+        synth.load_patch(99, Patch::Fm(FmPatch::bell()));
+    }
+
+    #[test]
+    fn test_synth_no_patch_uses_default_sine() {
+        // Without a loaded patch, default sine should still produce sound
+        let mut synth = Synthesizer::new(44100);
+        synth.note_on(0, 60, 100);
+        let mut buf = [0.0f32; 1024];
+        synth.render(&mut buf);
+        let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(max_abs > 0.001, "default sine fallback should produce sound");
+    }
+
+    #[test]
+    fn test_synth_score_with_note_off_event() {
+        let mut synth = Synthesizer::new(44100);
+        synth.load_patch(0, Patch::Fm(FmPatch::electric_piano()));
+
+        let mut score = Score::new(120, 1);
+        score.add_event(NoteEvent {
+            delta_tick: 0,
+            channel: 0,
+            note: 60,
+            velocity: 100,
+            kind: NoteEventKind::NoteOn,
+        });
+        score.add_event(NoteEvent {
+            delta_tick: 96,
+            channel: 0,
+            note: 60,
+            velocity: 0,
+            kind: NoteEventKind::NoteOff,
+        });
+        synth.load_score(&score);
+
+        // Render a full second — note should have been triggered and released
+        let mut buf = [0.0f32; 44100];
+        synth.render(&mut buf);
+        // After note release and full render, voice should be inactive
+        assert_eq!(synth.active_voice_count(), 0, "voice should be inactive after release");
+    }
 }

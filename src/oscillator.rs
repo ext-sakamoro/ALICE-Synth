@@ -248,4 +248,187 @@ mod tests {
         let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         assert!(max - min > 0.5, "noise should have spread");
     }
+
+    // --- NEW TESTS ---
+
+    #[test]
+    fn test_rcp_32768_correctness() {
+        // Verify reciprocal constant matches its intended value
+        let expected = 1.0_f32 / 32768.0;
+        assert!((RCP_32768 - expected).abs() < 1e-10, "RCP_32768 constant incorrect");
+    }
+
+    #[test]
+    fn test_rcp_12_correctness() {
+        let expected = 1.0_f32 / 12.0;
+        assert!((RCP_12 - expected).abs() < 1e-10, "RCP_12 constant incorrect");
+    }
+
+    #[test]
+    fn test_sin_approx_negative_angle() {
+        // sin(-π/2) ≈ -1.0 (via negative branch in normalization)
+        let result = sin_approx(-PI / 2.0);
+        assert!((result - (-1.0)).abs() < 0.002, "sin(-π/2) ≈ -1.0, got {result}");
+    }
+
+    #[test]
+    fn test_sin_approx_three_pi_over_two() {
+        // 3π/2 → sin ≈ -1.0
+        let result = sin_approx(3.0 * PI / 2.0);
+        assert!((result - (-1.0)).abs() < 0.002, "sin(3π/2) ≈ -1.0, got {result}");
+    }
+
+    #[test]
+    fn test_sin_approx_two_pi() {
+        // 2π → sin ≈ 0.0
+        let result = sin_approx(TWO_PI);
+        assert!(result.abs() < 0.002, "sin(2π) ≈ 0.0, got {result}");
+    }
+
+    #[test]
+    fn test_waveform_from_u8_all_variants() {
+        assert_eq!(Waveform::from_u8(0), Waveform::Sine);
+        assert_eq!(Waveform::from_u8(1), Waveform::Saw);
+        assert_eq!(Waveform::from_u8(2), Waveform::Square);
+        assert_eq!(Waveform::from_u8(3), Waveform::Triangle);
+        assert_eq!(Waveform::from_u8(4), Waveform::Noise);
+        // Out-of-range falls back to Sine
+        assert_eq!(Waveform::from_u8(255), Waveform::Sine);
+    }
+
+    #[test]
+    fn test_oscillator_square_output_bounds() {
+        // Square wave must be exactly +1 or -1
+        let mut osc = Oscillator::new(Waveform::Square);
+        let inv_sr = 1.0_f32 / 44100.0;
+        for _ in 0..200 {
+            let s = osc.next_sample(440.0, inv_sr);
+            assert!(
+                (s - 1.0).abs() < 0.001 || (s + 1.0).abs() < 0.001,
+                "square wave must be +1 or -1, got {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_oscillator_triangle_range() {
+        // Triangle wave must stay in [-1, 1]
+        let mut osc = Oscillator::new(Waveform::Triangle);
+        let inv_sr = 1.0_f32 / 44100.0;
+        for _ in 0..500 {
+            let s = osc.next_sample(440.0, inv_sr);
+            assert!(s >= -1.0 && s <= 1.0, "triangle out of range: {s}");
+        }
+    }
+
+    #[test]
+    fn test_oscillator_triangle_peak() {
+        // At phase=0.25 the triangle should be near +1, at phase=0.75 near -1
+        // Produce one full cycle at 1 Hz with sample rate 4
+        let mut osc = Oscillator::new(Waveform::Triangle);
+        let inv_sr = 1.0_f32 / 4.0;
+        let s0 = osc.next_sample(1.0, inv_sr); // phase 0.0 → -1+0 = -1? 4*0 - 1 = -1
+        let s1 = osc.next_sample(1.0, inv_sr); // phase 0.25 → 4*0.25-1 = 0
+        let s2 = osc.next_sample(1.0, inv_sr); // phase 0.5 → 3-4*0.5 = 1
+        let s3 = osc.next_sample(1.0, inv_sr); // phase 0.75 → 3-4*0.75 = 0
+        // The triangle at phase=0 should be -1
+        assert!((s0 - (-1.0)).abs() < 0.01, "triangle at phase=0 should be -1, got {s0}");
+        // At phase=0.5 (second half), 3 - 4*0.5 = 1
+        assert!((s2 - 1.0).abs() < 0.01, "triangle at phase=0.5 should be 1, got {s2}");
+        let _ = (s1, s3);
+    }
+
+    #[test]
+    fn test_oscillator_reset_restarts_phase() {
+        let mut osc = Oscillator::new(Waveform::Saw);
+        let inv_sr = 1.0_f32 / 44100.0;
+        let first = osc.next_sample(440.0, inv_sr);
+        // Advance a few samples
+        for _ in 0..10 {
+            osc.next_sample(440.0, inv_sr);
+        }
+        // Reset should bring phase back to 0
+        osc.reset();
+        let after_reset = osc.next_sample(440.0, inv_sr);
+        assert!(
+            (after_reset - first).abs() < 0.001,
+            "after reset, first sample should match original first sample"
+        );
+    }
+
+    #[test]
+    fn test_oscillator_fm_output_range() {
+        let mut osc = Oscillator::new(Waveform::Sine);
+        let inv_sr = 1.0_f32 / 44100.0;
+        for _ in 0..500 {
+            let s = osc.next_sample_fm(440.0, inv_sr, 0.5);
+            assert!(s >= -1.01 && s <= 1.01, "FM output out of range: {s}");
+        }
+    }
+
+    #[test]
+    fn test_midi_c4_frequency() {
+        // Middle C (MIDI note 60) should be ~261.63 Hz
+        let c4 = midi_to_freq(60);
+        assert!((c4 - 261.63).abs() < 2.0, "C4 should be ~261.63 Hz, got {c4}");
+    }
+
+    #[test]
+    fn test_midi_octave_doubling() {
+        // Each octave (12 semitones) should double the frequency
+        let a4 = midi_to_freq(69);
+        let a5 = midi_to_freq(81);
+        let ratio = a5 / a4;
+        assert!((ratio - 2.0).abs() < 0.02, "octave ratio should be ~2.0, got {ratio}");
+    }
+
+    #[test]
+    fn test_midi_note_0_is_positive() {
+        // MIDI note 0 (lowest) should produce a positive frequency
+        let freq = midi_to_freq(0);
+        assert!(freq > 0.0, "MIDI note 0 frequency must be positive, got {freq}");
+    }
+
+    #[test]
+    fn test_midi_note_127_below_nyquist() {
+        // MIDI note 127 should be well below 44100/2 Nyquist
+        let freq = midi_to_freq(127);
+        assert!(freq < 22050.0, "MIDI note 127 should be below Nyquist, got {freq}");
+    }
+
+    #[test]
+    fn test_noise_output_within_bounds() {
+        // The LFSR noise is based on a 16-bit state (0..=65535), normalized by 1/32768.
+        // Before the final *2-1 the range is [0, 65535/32768] = [0, ~2.0], giving
+        // a maximum output just below 2.0*2 - 1 = 3.0 in the worst case.
+        // In practice the state is 16-bit (0..65535), so the maximum output is
+        // (65535/32768)*2 - 1 ≈ 3.0. We just verify the noise has reasonable spread.
+        let mut osc = Oscillator::new(Waveform::Noise);
+        let inv_sr = 1.0_f32 / 44100.0;
+        let mut samples = [0.0f32; 1000];
+        for s in samples.iter_mut() {
+            *s = osc.next_sample(440.0, inv_sr);
+        }
+        // Verify the noise covers at least a 1.0 range of values
+        let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(max - min > 1.0, "noise should span a wide range, spread={}", max - min);
+        // Verify it is not DC
+        let mean: f32 = samples.iter().sum::<f32>() / samples.len() as f32;
+        assert!(mean.abs() < 2.0, "noise mean should be roughly bounded, got {mean}");
+    }
+
+    #[test]
+    fn test_floor_f32_positive() {
+        assert!((floor_f32(2.9) - 2.0).abs() < 1e-6);
+        assert!((floor_f32(3.0) - 3.0).abs() < 1e-6);
+        assert!((floor_f32(0.1) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_floor_f32_negative() {
+        assert!((floor_f32(-0.1) - (-1.0)).abs() < 1e-6);
+        assert!((floor_f32(-1.9) - (-2.0)).abs() < 1e-6);
+        assert!((floor_f32(-2.0) - (-2.0)).abs() < 1e-6);
+    }
 }

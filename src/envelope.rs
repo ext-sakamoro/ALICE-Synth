@@ -264,4 +264,122 @@ mod tests {
         assert!(params.attack < 100);
         assert!(params.sustain == 0.0);
     }
+
+    // --- NEW TESTS ---
+
+    #[test]
+    fn test_adsr_idle_produces_zero() {
+        let params = Adsr { attack: 10, decay: 10, sustain: 0.5, release: 10 };
+        let mut state = AdsrState::new();
+        // Without note_on, must stay idle and output 0
+        let level = state.next(&params);
+        assert_eq!(level, 0.0, "idle envelope must output 0.0");
+        assert!(!state.is_active());
+    }
+
+    #[test]
+    fn test_adsr_initial_phase_idle() {
+        let state = AdsrState::new();
+        assert!(!state.is_active());
+        assert_eq!(state.level(), 0.0);
+        assert_eq!(state.phase(), AdsrPhase::Idle);
+    }
+
+    #[test]
+    fn test_adsr_note_on_sets_attack_phase() {
+        let mut state = AdsrState::new();
+        state.note_on();
+        assert_eq!(state.phase(), AdsrPhase::Attack);
+        assert!(state.is_active());
+    }
+
+    #[test]
+    fn test_adsr_note_off_from_idle_stays_idle() {
+        let mut state = AdsrState::new();
+        state.note_off(); // note_off while idle should be a no-op
+        assert_eq!(state.phase(), AdsrPhase::Idle);
+        assert!(!state.is_active());
+    }
+
+    #[test]
+    fn test_adsr_zero_attack_skips_to_decay() {
+        let params = Adsr { attack: 0, decay: 10, sustain: 0.5, release: 10 };
+        let mut state = AdsrState::new();
+        state.note_on();
+        let level = state.next(&params);
+        // Zero attack: immediately jumps to level 1.0 and transitions to decay
+        assert!(level >= 1.0 || level >= 0.9, "zero-attack should reach ~1.0, got {level}");
+        assert_eq!(state.phase(), AdsrPhase::Decay);
+    }
+
+    #[test]
+    fn test_adsr_zero_decay_skips_to_sustain() {
+        let params = Adsr { attack: 0, decay: 0, sustain: 0.7, release: 10 };
+        let mut state = AdsrState::new();
+        state.note_on();
+        state.next(&params); // processes zero-attack → decay
+        let level = state.next(&params); // processes zero-decay → sustain
+        assert_eq!(state.phase(), AdsrPhase::Sustain);
+        assert!((level - 0.7).abs() < 0.05, "level should be sustain=0.7, got {level}");
+    }
+
+    #[test]
+    fn test_adsr_zero_release_goes_idle_immediately() {
+        let params = Adsr { attack: 0, decay: 0, sustain: 0.5, release: 0 };
+        let mut state = AdsrState::new();
+        state.note_on();
+        // Process until sustain
+        for _ in 0..5 { state.next(&params); }
+        state.note_off();
+        let level = state.next(&params);
+        assert_eq!(state.phase(), AdsrPhase::Idle);
+        assert_eq!(level, 0.0);
+    }
+
+    #[test]
+    fn test_adsr_level_never_exceeds_one() {
+        let params = Adsr { attack: 20, decay: 20, sustain: 0.6, release: 20 };
+        let mut state = AdsrState::new();
+        state.note_on();
+        for _ in 0..100 {
+            let l = state.next(&params);
+            assert!(l <= 1.001, "level must not exceed 1.0, got {l}");
+        }
+    }
+
+    #[test]
+    fn test_adsr_level_never_below_zero() {
+        let params = Adsr { attack: 5, decay: 5, sustain: 0.3, release: 20 };
+        let mut state = AdsrState::new();
+        state.note_on();
+        for i in 0..50 {
+            if i == 15 { state.note_off(); }
+            let l = state.next(&params);
+            assert!(l >= -0.001, "level must not go below 0.0, got {l}");
+        }
+    }
+
+    #[test]
+    fn test_adsr_organ_preset_full_sustain() {
+        let params = Adsr::organ(44100.0);
+        assert_eq!(params.sustain, 1.0);
+        assert!(params.attack < 200, "organ attack should be short");
+    }
+
+    #[test]
+    fn test_adsr_piano_preset_values() {
+        let params = Adsr::piano(44100.0);
+        assert!(params.sustain < 0.5, "piano sustain should be < 0.5");
+        assert!(params.attack > 0, "piano should have non-zero attack");
+        assert!(params.decay > 0, "piano should have non-zero decay");
+        assert!(params.release > 0, "piano should have non-zero release");
+    }
+
+    #[test]
+    fn test_adsr_from_ms_produces_nonzero_samples() {
+        let params = Adsr::from_ms(100.0, 200.0, 0.5, 300.0, 44100.0);
+        // 100ms at 44100 = 4410 samples for attack
+        assert!(params.attack > 4000 && params.attack < 5000,
+            "100ms attack at 44100 sr: expected ~4410, got {}", params.attack);
+    }
 }

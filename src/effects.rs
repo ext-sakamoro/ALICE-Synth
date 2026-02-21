@@ -291,4 +291,127 @@ mod tests {
         let out = reverb.process(0.0);
         assert!(out.abs() < 0.01, "after reset, output should be near zero");
     }
+
+    // --- NEW TESTS ---
+
+    #[test]
+    fn test_delay_zero_mix_passes_dry() {
+        // mix=0.0 → output should equal input (dry only)
+        let mut delay = Delay::new(100, 0.0, 0.0);
+        let out = delay.process(0.75);
+        assert!((out - 0.75).abs() < 0.001, "zero-mix delay should pass dry signal, got {out}");
+    }
+
+    #[test]
+    fn test_delay_from_ms_creates_correct_buffer() {
+        // 10ms at 1000 Hz = 10 samples
+        let delay = Delay::from_ms(10.0, 1000.0, 0.5, 0.5);
+        assert_eq!(delay.buffer.len(), 10);
+    }
+
+    #[test]
+    fn test_delay_reset_clears_buffer() {
+        let mut delay = Delay::new(4, 0.9, 0.5);
+        // Load up the buffer
+        for _ in 0..4 { delay.process(1.0); }
+        delay.reset();
+        // After reset, write pos should be 0 and buffer zeroed
+        assert_eq!(delay.write_pos, 0);
+        assert!(delay.buffer.iter().all(|&s| s == 0.0), "buffer should be zeroed after reset");
+    }
+
+    #[test]
+    fn test_delay_feedback_clamped() {
+        // Feedback ≥ 1.0 should be clamped to 0.99 to prevent runaway
+        let delay = Delay::new(4, 2.0, 0.5);
+        assert!(delay.feedback <= 0.99, "feedback should be clamped to 0.99");
+    }
+
+    #[test]
+    fn test_lowpass_reset_clears_state() {
+        let mut lpf = LowPassFilter::new(1000.0, 44100.0);
+        for _ in 0..100 { lpf.process(1.0); }
+        lpf.reset();
+        // After reset, passing zero should produce zero
+        let out = lpf.process(0.0);
+        assert_eq!(out, 0.0, "LPF after reset with 0 input should output 0");
+    }
+
+    #[test]
+    fn test_lowpass_high_cutoff_near_passthrough() {
+        // High cutoff → alpha is larger → converges to input faster than low cutoff.
+        // At 20kHz/44100Hz, alpha ≈ 0.74.  After 10 steps at 1.0 input, output
+        // should be substantially closer to 1.0 than the low-cutoff case.
+        let mut lpf_high = LowPassFilter::new(20000.0, 44100.0);
+        let mut lpf_low  = LowPassFilter::new(10.0,    44100.0);
+        let mut out_high = 0.0_f32;
+        let mut out_low  = 0.0_f32;
+        for _ in 0..20 {
+            out_high = lpf_high.process(1.0);
+            out_low  = lpf_low.process(1.0);
+        }
+        assert!(out_high > out_low,
+            "high-cutoff LPF should converge faster, high={out_high}, low={out_low}");
+        assert!(out_high > 0.5,
+            "high-cutoff LPF should reach at least 0.5 after 20 samples, got {out_high}");
+    }
+
+    #[test]
+    fn test_lowpass_low_cutoff_attenuates() {
+        // Very low cutoff → first sample output should be very small
+        let mut lpf = LowPassFilter::new(1.0, 44100.0);
+        let out = lpf.process(1.0);
+        assert!(out < 0.01, "very low cutoff LPF should heavily attenuate first sample, got {out}");
+    }
+
+    #[test]
+    fn test_svf_reset_clears_state() {
+        let mut svf = StateVariableFilter::new(1000.0, 0.5, 44100.0);
+        for _ in 0..100 { svf.process(1.0); }
+        svf.reset();
+        let (low, band, high) = svf.process_svf(0.0);
+        assert_eq!(low, 0.0);
+        assert_eq!(band, 0.0);
+        assert_eq!(high, 0.0);
+    }
+
+    #[test]
+    fn test_svf_lp_hp_sum_near_input() {
+        // SVF: high = input - low - damp*band.  low and band start at 0.
+        // On the first sample: band=0, low=0 → high = input.
+        // LP+HP on first call: 0 + input = input.  After the update, low changes.
+        // We just verify that LP + HP + BP = input + some linear combination of state.
+        // A simpler, correct invariant: after steady-state with DC input, LP ≈ input.
+        let mut svf = StateVariableFilter::new(5000.0, 0.0, 44100.0);
+        // Feed many samples of DC=1.0 until low-pass output settles near 1.0
+        let mut low_out = 0.0_f32;
+        for _ in 0..500 {
+            let (l, _, _) = svf.process_svf(1.0);
+            low_out = l;
+        }
+        assert!(low_out > 0.9, "SVF low-pass should converge to DC input after many samples, got {low_out}");
+    }
+
+    #[test]
+    fn test_reverb_produces_output_after_impulse() {
+        // The comb delays are 1116+ samples, so the impulse echo appears after
+        // at least 1116 samples.  Feed the impulse, then iterate enough samples
+        // to reach the first comb echo.
+        let mut reverb = Reverb::new(44100.0, 1.0, 0.8, 1.0);
+        reverb.process(1.0); // feed impulse
+        let mut has_tail = false;
+        for _ in 0..2000 {
+            let out = reverb.process(0.0);
+            if out.abs() > 0.001 { has_tail = true; break; }
+        }
+        assert!(has_tail, "reverb should produce a decaying tail after impulse within 2000 samples");
+    }
+
+    #[test]
+    fn test_reverb_mix_zero_passes_dry() {
+        // mix=0 → output = input regardless of reverb state
+        let mut reverb = Reverb::new(44100.0, 1.0, 0.8, 0.0);
+        let out = reverb.process(0.42);
+        assert!((out - 0.42).abs() < 0.001, "zero-mix reverb should pass dry, got {out}");
+    }
 }

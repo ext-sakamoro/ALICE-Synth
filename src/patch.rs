@@ -299,4 +299,105 @@ mod tests {
         assert_eq!(patch.waveform, Waveform::Saw);
         assert!(patch.cutoff_hz > 0.0);
     }
+
+    // --- NEW TESTS ---
+
+    #[test]
+    fn test_synth_type_from_patch_fm() {
+        let patch = Patch::Fm(FmPatch::electric_piano());
+        assert_eq!(patch.synth_type(), crate::patch::SynthType::Fm);
+    }
+
+    #[test]
+    fn test_synth_type_from_patch_additive() {
+        let patch = Patch::Additive(AdditivePatch::organ());
+        assert_eq!(patch.synth_type(), crate::patch::SynthType::Additive);
+    }
+
+    #[test]
+    fn test_synth_type_from_patch_subtractive() {
+        let patch = Patch::Subtractive(SubtractivePatch::bass());
+        assert_eq!(patch.synth_type(), crate::patch::SynthType::Subtractive);
+    }
+
+    #[test]
+    fn test_synth_type_from_patch_wavetable() {
+        let adsr = crate::envelope::Adsr::organ(44100.0);
+        let patch = Patch::Wavetable(WavetablePatch::from_fn(|_| 0.0, adsr));
+        assert_eq!(patch.synth_type(), crate::patch::SynthType::Wavetable);
+    }
+
+    #[test]
+    fn test_additive_strings_harmonic_rolloff() {
+        let patch = AdditivePatch::strings();
+        // Harmonic amplitudes must follow 1/n rolloff: h[0]=1.0, h[1]=0.5, h[2]=0.333...
+        assert!((patch.harmonics[0] - 1.0).abs() < 0.001);
+        assert!((patch.harmonics[1] - 0.5).abs() < 0.001);
+        assert!((patch.harmonics[2] - (1.0/3.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_additive_organ_odd_harmonics() {
+        let patch = AdditivePatch::organ();
+        // Even-indexed positions (harmonics 2,4,6,...) should be zero
+        assert_eq!(patch.harmonics[1], 0.0, "2nd harmonic should be 0");
+        assert_eq!(patch.harmonics[3], 0.0, "4th harmonic should be 0");
+        assert_eq!(patch.harmonics[5], 0.0, "6th harmonic should be 0");
+    }
+
+    #[test]
+    fn test_fm_bell_patch_operators() {
+        let patch = FmPatch::bell();
+        assert_eq!(patch.operators[0].ratio, 1.0);
+        assert!((patch.operators[1].ratio - 3.5).abs() < 0.001);
+        assert!(patch.operators[1].mod_index > 0.0);
+        // Unused operators should have zero level
+        assert_eq!(patch.operators[2].level, 0.0);
+        assert_eq!(patch.operators[3].level, 0.0);
+    }
+
+    #[test]
+    fn test_subtractive_pluck_patch() {
+        let patch = SubtractivePatch::pluck();
+        assert_eq!(patch.waveform, Waveform::Square);
+        assert!(patch.resonance >= 0.0 && patch.resonance < 1.0);
+        assert!(patch.cutoff_hz > 0.0);
+        assert_eq!(patch.amp_envelope.sustain, 0.0);
+    }
+
+    #[test]
+    fn test_wavetable_from_fn_sine() {
+        let adsr = crate::envelope::Adsr::organ(44100.0);
+        let wt = WavetablePatch::from_fn(
+            |phase| (phase * 2.0 * PI).sin(),
+            adsr,
+        );
+        // Verify that all 256 samples are within [-1, 1]
+        for &s in wt.table.iter() {
+            assert!(s >= -1.001 && s <= 1.001, "wavetable sample out of range: {s}");
+        }
+    }
+
+    #[test]
+    fn test_wavetable_lookup_phase_zero() {
+        let adsr = crate::envelope::Adsr::organ(44100.0);
+        let wt = WavetablePatch::from_fn(|_| 0.5, adsr);
+        // Constant wavetable: lookup at any phase must return 0.5
+        let v0 = wt.lookup(0.0);
+        let v1 = wt.lookup(0.5);
+        let v2 = wt.lookup(0.999);
+        assert!((v0 - 0.5).abs() < 0.001, "lookup(0.0) should be 0.5, got {v0}");
+        assert!((v1 - 0.5).abs() < 0.001, "lookup(0.5) should be 0.5, got {v1}");
+        assert!((v2 - 0.5).abs() < 0.001, "lookup(0.999) should be 0.5, got {v2}");
+    }
+
+    #[test]
+    fn test_wavetable_interpolation_midpoint() {
+        let adsr = crate::envelope::Adsr::organ(44100.0);
+        // Ramp from 0 to 1 across the table
+        let wt = WavetablePatch::from_fn(|phase| phase * 2.0 - 1.0, adsr);
+        // At phase=0.5 (midpoint), value should be ~0.0
+        let v = wt.lookup(0.5);
+        assert!(v.abs() < 0.05, "midpoint ramp wavetable lookup should be near 0, got {v}");
+    }
 }
