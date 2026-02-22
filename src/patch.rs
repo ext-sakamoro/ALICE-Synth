@@ -20,6 +20,7 @@ pub enum SynthType {
 
 /// Unified patch enum
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Patch {
     Fm(FmPatch),
     Additive(AdditivePatch),
@@ -154,8 +155,7 @@ impl AdditivePatch {
         let sr = 44100.0;
         Self {
             harmonics: [
-                1.0, 0.0, 0.5, 0.0, 0.33, 0.0, 0.25, 0.0, 0.2, 0.0, 0.16, 0.0, 0.14, 0.0,
-                0.12, 0.0,
+                1.0, 0.0, 0.5, 0.0, 0.33, 0.0, 0.25, 0.0, 0.2, 0.0, 0.16, 0.0, 0.14, 0.0, 0.12, 0.0,
             ],
             envelope: Adsr::organ(sr),
         }
@@ -253,7 +253,11 @@ impl WavetablePatch {
         let idx_floor = {
             let i = idx_f as i32;
             let f = i as f32;
-            if idx_f < f { f - 1.0 } else { f }
+            if idx_f < f {
+                f - 1.0
+            } else {
+                f
+            }
         };
         let frac = idx_f - idx_floor;
         self.table[idx0] * (1.0 - frac) + self.table[idx1] * frac
@@ -284,10 +288,7 @@ mod tests {
     #[test]
     fn test_wavetable_lookup() {
         let sr = 44100.0;
-        let wt = WavetablePatch::from_fn(
-            |phase| (phase * 2.0 * PI).sin(),
-            Adsr::organ(sr),
-        );
+        let wt = WavetablePatch::from_fn(|phase| (phase * 2.0 * PI).sin(), Adsr::organ(sr));
         // Phase 0.25 → sin(π/2) ≈ 1.0
         let val = wt.lookup(0.25);
         assert!((val - 1.0).abs() < 0.05, "expected ~1.0, got {val}");
@@ -333,7 +334,7 @@ mod tests {
         // Harmonic amplitudes must follow 1/n rolloff: h[0]=1.0, h[1]=0.5, h[2]=0.333...
         assert!((patch.harmonics[0] - 1.0).abs() < 0.001);
         assert!((patch.harmonics[1] - 0.5).abs() < 0.001);
-        assert!((patch.harmonics[2] - (1.0/3.0)).abs() < 0.001);
+        assert!((patch.harmonics[2] - (1.0 / 3.0)).abs() < 0.001);
     }
 
     #[test]
@@ -368,13 +369,13 @@ mod tests {
     #[test]
     fn test_wavetable_from_fn_sine() {
         let adsr = crate::envelope::Adsr::organ(44100.0);
-        let wt = WavetablePatch::from_fn(
-            |phase| (phase * 2.0 * PI).sin(),
-            adsr,
-        );
+        let wt = WavetablePatch::from_fn(|phase| (phase * 2.0 * PI).sin(), adsr);
         // Verify that all 256 samples are within [-1, 1]
         for &s in wt.table.iter() {
-            assert!(s >= -1.001 && s <= 1.001, "wavetable sample out of range: {s}");
+            assert!(
+                s >= -1.001 && s <= 1.001,
+                "wavetable sample out of range: {s}"
+            );
         }
     }
 
@@ -386,9 +387,18 @@ mod tests {
         let v0 = wt.lookup(0.0);
         let v1 = wt.lookup(0.5);
         let v2 = wt.lookup(0.999);
-        assert!((v0 - 0.5).abs() < 0.001, "lookup(0.0) should be 0.5, got {v0}");
-        assert!((v1 - 0.5).abs() < 0.001, "lookup(0.5) should be 0.5, got {v1}");
-        assert!((v2 - 0.5).abs() < 0.001, "lookup(0.999) should be 0.5, got {v2}");
+        assert!(
+            (v0 - 0.5).abs() < 0.001,
+            "lookup(0.0) should be 0.5, got {v0}"
+        );
+        assert!(
+            (v1 - 0.5).abs() < 0.001,
+            "lookup(0.5) should be 0.5, got {v1}"
+        );
+        assert!(
+            (v2 - 0.5).abs() < 0.001,
+            "lookup(0.999) should be 0.5, got {v2}"
+        );
     }
 
     #[test]
@@ -398,6 +408,9 @@ mod tests {
         let wt = WavetablePatch::from_fn(|phase| phase * 2.0 - 1.0, adsr);
         // At phase=0.5 (midpoint), value should be ~0.0
         let v = wt.lookup(0.5);
-        assert!(v.abs() < 0.05, "midpoint ramp wavetable lookup should be near 0, got {v}");
+        assert!(
+            v.abs() < 0.05,
+            "midpoint ramp wavetable lookup should be near 0, got {v}"
+        );
     }
 }

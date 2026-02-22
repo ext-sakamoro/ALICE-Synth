@@ -85,7 +85,7 @@ impl NoteEventKind {
 
 /// Compact note event — 4 bytes
 ///
-/// Layout: [delta_tick:12][channel:4][note:7][velocity:7][kind:2]
+/// Layout: \[delta_tick:12\]\[channel:4\]\[note:7\]\[velocity:7\]\[kind:2\]
 /// = 32 bits = 4 bytes per event
 #[derive(Debug, Clone, Copy)]
 pub struct NoteEvent {
@@ -297,7 +297,11 @@ mod tests {
 
     #[test]
     fn test_score_header_magic_bytes() {
-        let header = ScoreHeader { tempo_bpm: 120, tracks: 1, tick_div: 96 };
+        let header = ScoreHeader {
+            tempo_bpm: 120,
+            tracks: 1,
+            tick_div: 96,
+        };
         let bytes = header.to_bytes();
         assert_eq!(&bytes[0..4], b"ASYN", "magic bytes must be ASYN");
     }
@@ -305,13 +309,19 @@ mod tests {
     #[test]
     fn test_score_header_from_bytes_invalid_magic() {
         let bad = b"BADM\x78\x00\x01\x30";
-        assert!(ScoreHeader::from_bytes(bad).is_none(), "invalid magic should return None");
+        assert!(
+            ScoreHeader::from_bytes(bad).is_none(),
+            "invalid magic should return None"
+        );
     }
 
     #[test]
     fn test_score_header_from_bytes_too_short() {
         let short = b"ASY";
-        assert!(ScoreHeader::from_bytes(short).is_none(), "too-short slice should return None");
+        assert!(
+            ScoreHeader::from_bytes(short).is_none(),
+            "too-short slice should return None"
+        );
     }
 
     #[test]
@@ -363,8 +373,20 @@ mod tests {
     #[test]
     fn test_score_total_ticks() {
         let mut score = Score::new(120, 1);
-        score.add_event(NoteEvent { delta_tick: 96, channel: 0, note: 60, velocity: 80, kind: NoteEventKind::NoteOn });
-        score.add_event(NoteEvent { delta_tick: 96, channel: 0, note: 60, velocity: 0,  kind: NoteEventKind::NoteOff });
+        score.add_event(NoteEvent {
+            delta_tick: 96,
+            channel: 0,
+            note: 60,
+            velocity: 80,
+            kind: NoteEventKind::NoteOn,
+        });
+        score.add_event(NoteEvent {
+            delta_tick: 96,
+            channel: 0,
+            note: 60,
+            velocity: 0,
+            kind: NoteEventKind::NoteOff,
+        });
         assert_eq!(score.total_ticks(), 192);
     }
 
@@ -372,29 +394,53 @@ mod tests {
     fn test_score_empty_total_ticks() {
         let score = Score::new(120, 1);
         assert_eq!(score.total_ticks(), 0);
-        assert_eq!(score.size_bytes(), 8, "empty score should be 8 bytes (header only)");
+        assert_eq!(
+            score.size_bytes(),
+            8,
+            "empty score should be 8 bytes (header only)"
+        );
     }
 
     #[test]
     fn test_score_duration_secs_at_120bpm() {
         let mut score = Score::new(120, 1);
         // 192 ticks at 120 BPM, 96 ticks/beat → 2 beats → 1 second
-        score.add_event(NoteEvent { delta_tick: 192, channel: 0, note: 60, velocity: 80, kind: NoteEventKind::NoteOn });
+        score.add_event(NoteEvent {
+            delta_tick: 192,
+            channel: 0,
+            note: 60,
+            velocity: 80,
+            kind: NoteEventKind::NoteOn,
+        });
         let dur = score.duration_secs();
-        assert!((dur - 1.0).abs() < 0.05, "192 ticks at 120BPM/96div should be ~1s, got {dur}");
+        assert!(
+            (dur - 1.0).abs() < 0.05,
+            "192 ticks at 120BPM/96div should be ~1s, got {dur}"
+        );
     }
 
     #[test]
     fn test_samples_per_tick_at_120bpm() {
-        let header = ScoreHeader { tempo_bpm: 120, tracks: 1, tick_div: 96 };
+        let header = ScoreHeader {
+            tempo_bpm: 120,
+            tracks: 1,
+            tick_div: 96,
+        };
         // 192 ticks/sec → samples_per_tick = 44100/192 ≈ 229.7
         let spt = header.samples_per_tick(44100.0);
-        assert!((spt - 229.7).abs() < 1.0, "samples_per_tick should be ~229.7, got {spt}");
+        assert!(
+            (spt - 229.7).abs() < 1.0,
+            "samples_per_tick should be ~229.7, got {spt}"
+        );
     }
 
     #[test]
     fn test_score_from_bytes_empty_events() {
-        let header = ScoreHeader { tempo_bpm: 100, tracks: 2, tick_div: 96 };
+        let header = ScoreHeader {
+            tempo_bpm: 100,
+            tracks: 2,
+            tick_div: 96,
+        };
         let bytes = header.to_bytes();
         let score = Score::from_bytes(&bytes).unwrap();
         assert_eq!(score.header.tempo_bpm, 100);

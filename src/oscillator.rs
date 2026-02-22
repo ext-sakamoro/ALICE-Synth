@@ -21,7 +21,11 @@ const RCP_12: f32 = 1.0 / 12.0;
 fn floor_f32(x: f32) -> f32 {
     let i = x as i32;
     let f = i as f32;
-    if x < f { f - 1.0 } else { f }
+    if x < f {
+        f - 1.0
+    } else {
+        f
+    }
 }
 
 /// Waveform type
@@ -128,7 +132,8 @@ impl Oscillator {
             }
             Waveform::Noise => {
                 // 16-bit LFSR noise; RCP_32768 replaces the / 32768.0 division
-                let bit = ((self.noise_state >> 0) ^ (self.noise_state >> 2)
+                let bit = (self.noise_state
+                    ^ (self.noise_state >> 2)
                     ^ (self.noise_state >> 3)
                     ^ (self.noise_state >> 5))
                     & 1;
@@ -179,7 +184,8 @@ fn pow2_approx(x: f32) -> f32 {
     let int_part = floor as i32;
 
     // 2^frac approximation (linear: good enough for ±6 semitones)
-    let frac_approx = 1.0 + frac * (0.6931472 + frac * (0.2402265 + frac * 0.0558011));
+    let frac_approx =
+        1.0 + frac * (core::f32::consts::LN_2 + frac * (0.2402265 + frac * 0.0558011));
 
     // 2^int via IEEE 754 exponent field manipulation
     let bits = ((127 + int_part) as u32) << 23;
@@ -255,27 +261,39 @@ mod tests {
     fn test_rcp_32768_correctness() {
         // Verify reciprocal constant matches its intended value
         let expected = 1.0_f32 / 32768.0;
-        assert!((RCP_32768 - expected).abs() < 1e-10, "RCP_32768 constant incorrect");
+        assert!(
+            (RCP_32768 - expected).abs() < 1e-10,
+            "RCP_32768 constant incorrect"
+        );
     }
 
     #[test]
     fn test_rcp_12_correctness() {
         let expected = 1.0_f32 / 12.0;
-        assert!((RCP_12 - expected).abs() < 1e-10, "RCP_12 constant incorrect");
+        assert!(
+            (RCP_12 - expected).abs() < 1e-10,
+            "RCP_12 constant incorrect"
+        );
     }
 
     #[test]
     fn test_sin_approx_negative_angle() {
         // sin(-π/2) ≈ -1.0 (via negative branch in normalization)
         let result = sin_approx(-PI / 2.0);
-        assert!((result - (-1.0)).abs() < 0.002, "sin(-π/2) ≈ -1.0, got {result}");
+        assert!(
+            (result - (-1.0)).abs() < 0.002,
+            "sin(-π/2) ≈ -1.0, got {result}"
+        );
     }
 
     #[test]
     fn test_sin_approx_three_pi_over_two() {
         // 3π/2 → sin ≈ -1.0
         let result = sin_approx(3.0 * PI / 2.0);
-        assert!((result - (-1.0)).abs() < 0.002, "sin(3π/2) ≈ -1.0, got {result}");
+        assert!(
+            (result - (-1.0)).abs() < 0.002,
+            "sin(3π/2) ≈ -1.0, got {result}"
+        );
     }
 
     #[test]
@@ -331,10 +349,16 @@ mod tests {
         let s1 = osc.next_sample(1.0, inv_sr); // phase 0.25 → 4*0.25-1 = 0
         let s2 = osc.next_sample(1.0, inv_sr); // phase 0.5 → 3-4*0.5 = 1
         let s3 = osc.next_sample(1.0, inv_sr); // phase 0.75 → 3-4*0.75 = 0
-        // The triangle at phase=0 should be -1
-        assert!((s0 - (-1.0)).abs() < 0.01, "triangle at phase=0 should be -1, got {s0}");
+                                               // The triangle at phase=0 should be -1
+        assert!(
+            (s0 - (-1.0)).abs() < 0.01,
+            "triangle at phase=0 should be -1, got {s0}"
+        );
         // At phase=0.5 (second half), 3 - 4*0.5 = 1
-        assert!((s2 - 1.0).abs() < 0.01, "triangle at phase=0.5 should be 1, got {s2}");
+        assert!(
+            (s2 - 1.0).abs() < 0.01,
+            "triangle at phase=0.5 should be 1, got {s2}"
+        );
         let _ = (s1, s3);
     }
 
@@ -370,7 +394,10 @@ mod tests {
     fn test_midi_c4_frequency() {
         // Middle C (MIDI note 60) should be ~261.63 Hz
         let c4 = midi_to_freq(60);
-        assert!((c4 - 261.63).abs() < 2.0, "C4 should be ~261.63 Hz, got {c4}");
+        assert!(
+            (c4 - 261.63).abs() < 2.0,
+            "C4 should be ~261.63 Hz, got {c4}"
+        );
     }
 
     #[test]
@@ -379,21 +406,30 @@ mod tests {
         let a4 = midi_to_freq(69);
         let a5 = midi_to_freq(81);
         let ratio = a5 / a4;
-        assert!((ratio - 2.0).abs() < 0.02, "octave ratio should be ~2.0, got {ratio}");
+        assert!(
+            (ratio - 2.0).abs() < 0.02,
+            "octave ratio should be ~2.0, got {ratio}"
+        );
     }
 
     #[test]
     fn test_midi_note_0_is_positive() {
         // MIDI note 0 (lowest) should produce a positive frequency
         let freq = midi_to_freq(0);
-        assert!(freq > 0.0, "MIDI note 0 frequency must be positive, got {freq}");
+        assert!(
+            freq > 0.0,
+            "MIDI note 0 frequency must be positive, got {freq}"
+        );
     }
 
     #[test]
     fn test_midi_note_127_below_nyquist() {
         // MIDI note 127 should be well below 44100/2 Nyquist
         let freq = midi_to_freq(127);
-        assert!(freq < 22050.0, "MIDI note 127 should be below Nyquist, got {freq}");
+        assert!(
+            freq < 22050.0,
+            "MIDI note 127 should be below Nyquist, got {freq}"
+        );
     }
 
     #[test]
@@ -412,10 +448,17 @@ mod tests {
         // Verify the noise covers at least a 1.0 range of values
         let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
         let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        assert!(max - min > 1.0, "noise should span a wide range, spread={}", max - min);
+        assert!(
+            max - min > 1.0,
+            "noise should span a wide range, spread={}",
+            max - min
+        );
         // Verify it is not DC
         let mean: f32 = samples.iter().sum::<f32>() / samples.len() as f32;
-        assert!(mean.abs() < 2.0, "noise mean should be roughly bounded, got {mean}");
+        assert!(
+            mean.abs() < 2.0,
+            "noise mean should be roughly bounded, got {mean}"
+        );
     }
 
     #[test]

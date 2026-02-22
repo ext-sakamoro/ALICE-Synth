@@ -10,11 +10,11 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::effects::{Effect, StateVariableFilter};
 use crate::envelope::{Adsr, AdsrState};
 use crate::oscillator::{midi_to_freq, Oscillator, Waveform};
 use crate::patch::{AdditivePatch, FmPatch, Patch, SubtractivePatch, WavetablePatch};
 use crate::score::{NoteEventKind, Score};
-use crate::effects::{Effect, StateVariableFilter};
 
 /// Maximum polyphony
 const MAX_VOICES: usize = 64;
@@ -203,15 +203,11 @@ impl Synthesizer {
                 let ch = voice.channel as usize;
                 let s = match self.patches.get(ch).and_then(|p| p.as_ref()) {
                     Some(Patch::Fm(ref fm)) => render_fm_voice(voice, fm, inv_sr),
-                    Some(Patch::Additive(ref add)) => {
-                        render_additive_voice(voice, add, sr, inv_sr)
-                    }
+                    Some(Patch::Additive(ref add)) => render_additive_voice(voice, add, sr, inv_sr),
                     Some(Patch::Subtractive(ref sub)) => {
                         render_subtractive_voice(voice, sub, sr, inv_sr)
                     }
-                    Some(Patch::Wavetable(ref wt)) => {
-                        render_wavetable_voice(voice, wt, inv_sr)
-                    }
+                    Some(Patch::Wavetable(ref wt)) => render_wavetable_voice(voice, wt, inv_sr),
                     None => {
                         // Default: simple sine
                         let env = voice.amp_env.next(&Adsr {
@@ -241,7 +237,7 @@ impl Synthesizer {
         let mut f32_buf: Vec<f32> = vec![0.0f32; buffer.len()];
         self.render(&mut f32_buf);
         for (i, &s) in f32_buf.iter().enumerate() {
-            let clamped = if s < -1.0 { -1.0f32 } else if s > 1.0 { 1.0 } else { s };
+            let clamped = s.clamp(-1.0, 1.0);
             buffer[i] = (clamped * 32767.0) as i16;
         }
         buffer.len()
@@ -269,7 +265,8 @@ impl Synthesizer {
 
         // Process events whose delta has elapsed
         while self.score_event_idx < event_count {
-            let event = self.score.as_ref().expect("score checked above").events[self.score_event_idx];
+            let event =
+                self.score.as_ref().expect("score checked above").events[self.score_event_idx];
             if (event.delta_tick as f32) > ticks_elapsed {
                 break;
             }
@@ -331,7 +328,9 @@ fn render_fm_voice(voice: &mut Voice, patch: &FmPatch, inv_sample_rate: f32) -> 
 
     let carrier_env = voice.amp_env.next(&op0.envelope);
     let carrier_freq = voice.freq_hz * op0.ratio;
-    let carrier = voice.osc.next_sample_fm(carrier_freq, inv_sample_rate, phase_mod);
+    let carrier = voice
+        .osc
+        .next_sample_fm(carrier_freq, inv_sample_rate, phase_mod);
 
     carrier * carrier_env * voice.velocity * op0.level
 }
@@ -388,7 +387,9 @@ fn render_subtractive_voice(
 
     // Filter with envelope modulation
     let cutoff = patch.cutoff_hz + filter_env * patch.filter_env_amount * 10000.0;
-    voice.filter.set_cutoff(cutoff.clamp(20.0, sample_rate * 0.45), sample_rate);
+    voice
+        .filter
+        .set_cutoff(cutoff.clamp(20.0, sample_rate * 0.45), sample_rate);
     let filtered = voice.filter.process(raw);
 
     filtered * amp_env * voice.velocity
@@ -532,7 +533,10 @@ mod tests {
         let mut buf = [0.0f32; 1024];
         synth.render(&mut buf);
         let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(max_abs > 0.001, "additive voice should produce sound, max={max_abs}");
+        assert!(
+            max_abs > 0.001,
+            "additive voice should produce sound, max={max_abs}"
+        );
     }
 
     #[test]
@@ -547,7 +551,10 @@ mod tests {
         let mut buf = [0.0f32; 1024];
         synth.render(&mut buf);
         let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(max_abs > 0.001, "wavetable voice should produce sound, max={max_abs}");
+        assert!(
+            max_abs > 0.001,
+            "wavetable voice should produce sound, max={max_abs}"
+        );
     }
 
     #[test]
@@ -568,7 +575,10 @@ mod tests {
 
         let max_loud = buf_loud.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         let max_quiet = buf_quiet.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(max_loud > max_quiet, "louder master_volume should produce bigger amplitude");
+        assert!(
+            max_loud > max_quiet,
+            "louder master_volume should produce bigger amplitude"
+        );
     }
 
     #[test]
@@ -600,7 +610,10 @@ mod tests {
         let mut buf = [0.0f32; 1024];
         synth.render(&mut buf);
         let max_abs = buf.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        assert!(max_abs > 0.001, "default sine fallback should produce sound");
+        assert!(
+            max_abs > 0.001,
+            "default sine fallback should produce sound"
+        );
     }
 
     #[test]
@@ -629,6 +642,10 @@ mod tests {
         let mut buf = [0.0f32; 44100];
         synth.render(&mut buf);
         // After note release and full render, voice should be inactive
-        assert_eq!(synth.active_voice_count(), 0, "voice should be inactive after release");
+        assert_eq!(
+            synth.active_voice_count(),
+            0,
+            "voice should be inactive after release"
+        );
     }
 }

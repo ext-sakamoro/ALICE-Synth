@@ -25,7 +25,13 @@ pub struct Adsr {
 
 impl Adsr {
     /// Create ADSR from time in milliseconds
-    pub fn from_ms(attack_ms: f32, decay_ms: f32, sustain: f32, release_ms: f32, sample_rate: f32) -> Self {
+    pub fn from_ms(
+        attack_ms: f32,
+        decay_ms: f32,
+        sustain: f32,
+        release_ms: f32,
+        sample_rate: f32,
+    ) -> Self {
         const RCP_1000: f32 = 1.0 / 1000.0;
         // Multiply by RCP_1000 instead of dividing per field
         let ms_to_samples = sample_rate * RCP_1000;
@@ -75,13 +81,19 @@ pub struct AdsrState {
     level: f32,
 }
 
-impl AdsrState {
-    pub fn new() -> Self {
+impl Default for AdsrState {
+    fn default() -> Self {
         Self {
             phase: AdsrPhase::Idle,
             counter: 0,
             level: 0.0,
         }
+    }
+}
+
+impl AdsrState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Trigger note-on
@@ -269,7 +281,12 @@ mod tests {
 
     #[test]
     fn test_adsr_idle_produces_zero() {
-        let params = Adsr { attack: 10, decay: 10, sustain: 0.5, release: 10 };
+        let params = Adsr {
+            attack: 10,
+            decay: 10,
+            sustain: 0.5,
+            release: 10,
+        };
         let mut state = AdsrState::new();
         // Without note_on, must stay idle and output 0
         let level = state.next(&params);
@@ -303,33 +320,56 @@ mod tests {
 
     #[test]
     fn test_adsr_zero_attack_skips_to_decay() {
-        let params = Adsr { attack: 0, decay: 10, sustain: 0.5, release: 10 };
+        let params = Adsr {
+            attack: 0,
+            decay: 10,
+            sustain: 0.5,
+            release: 10,
+        };
         let mut state = AdsrState::new();
         state.note_on();
         let level = state.next(&params);
         // Zero attack: immediately jumps to level 1.0 and transitions to decay
-        assert!(level >= 1.0 || level >= 0.9, "zero-attack should reach ~1.0, got {level}");
+        assert!(
+            level >= 1.0 || level >= 0.9,
+            "zero-attack should reach ~1.0, got {level}"
+        );
         assert_eq!(state.phase(), AdsrPhase::Decay);
     }
 
     #[test]
     fn test_adsr_zero_decay_skips_to_sustain() {
-        let params = Adsr { attack: 0, decay: 0, sustain: 0.7, release: 10 };
+        let params = Adsr {
+            attack: 0,
+            decay: 0,
+            sustain: 0.7,
+            release: 10,
+        };
         let mut state = AdsrState::new();
         state.note_on();
         state.next(&params); // processes zero-attack → decay
         let level = state.next(&params); // processes zero-decay → sustain
         assert_eq!(state.phase(), AdsrPhase::Sustain);
-        assert!((level - 0.7).abs() < 0.05, "level should be sustain=0.7, got {level}");
+        assert!(
+            (level - 0.7).abs() < 0.05,
+            "level should be sustain=0.7, got {level}"
+        );
     }
 
     #[test]
     fn test_adsr_zero_release_goes_idle_immediately() {
-        let params = Adsr { attack: 0, decay: 0, sustain: 0.5, release: 0 };
+        let params = Adsr {
+            attack: 0,
+            decay: 0,
+            sustain: 0.5,
+            release: 0,
+        };
         let mut state = AdsrState::new();
         state.note_on();
         // Process until sustain
-        for _ in 0..5 { state.next(&params); }
+        for _ in 0..5 {
+            state.next(&params);
+        }
         state.note_off();
         let level = state.next(&params);
         assert_eq!(state.phase(), AdsrPhase::Idle);
@@ -338,7 +378,12 @@ mod tests {
 
     #[test]
     fn test_adsr_level_never_exceeds_one() {
-        let params = Adsr { attack: 20, decay: 20, sustain: 0.6, release: 20 };
+        let params = Adsr {
+            attack: 20,
+            decay: 20,
+            sustain: 0.6,
+            release: 20,
+        };
         let mut state = AdsrState::new();
         state.note_on();
         for _ in 0..100 {
@@ -349,11 +394,18 @@ mod tests {
 
     #[test]
     fn test_adsr_level_never_below_zero() {
-        let params = Adsr { attack: 5, decay: 5, sustain: 0.3, release: 20 };
+        let params = Adsr {
+            attack: 5,
+            decay: 5,
+            sustain: 0.3,
+            release: 20,
+        };
         let mut state = AdsrState::new();
         state.note_on();
         for i in 0..50 {
-            if i == 15 { state.note_off(); }
+            if i == 15 {
+                state.note_off();
+            }
             let l = state.next(&params);
             assert!(l >= -0.001, "level must not go below 0.0, got {l}");
         }
@@ -379,7 +431,10 @@ mod tests {
     fn test_adsr_from_ms_produces_nonzero_samples() {
         let params = Adsr::from_ms(100.0, 200.0, 0.5, 300.0, 44100.0);
         // 100ms at 44100 = 4410 samples for attack
-        assert!(params.attack > 4000 && params.attack < 5000,
-            "100ms attack at 44100 sr: expected ~4410, got {}", params.attack);
+        assert!(
+            params.attack > 4000 && params.attack < 5000,
+            "100ms attack at 44100 sr: expected ~4410, got {}",
+            params.attack
+        );
     }
 }
