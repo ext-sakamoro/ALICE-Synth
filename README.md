@@ -21,7 +21,7 @@ Instead of encoding audio waveforms, encode **the instructions to generate them*
 
 - **Instruments** = mathematical oscillator definitions (FM, additive, subtractive, wavetable)
 - **Score** = note events with timing, pitch, velocity, and expression
-- **Effects** = DSP graph descriptions (reverb IR as exponential decay, delay as recurrence)
+- **Effects** = DSP graph descriptions (delay, filter — all parametric, no impulse response samples)
 
 The playback device synthesizes the audio in real-time from these descriptions — exactly like a MIDI synthesizer, but with ALICE-grade compression and deterministic output.
 
@@ -41,14 +41,14 @@ The playback device synthesizes the audio in real-time from these descriptions �
 │              ▼              ▼              ▼                     │
 │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐            │
 │  │  FM Synth    │ │  Additive    │ │  Wavetable   │            │
-│  │  4-op DX7    │ │  Harmonic    │ │  Single-cycle│            │
+│  │  2-op FM     │ │  Harmonic    │ │  Single-cycle│            │
 │  │  (32 bytes)  │ │  (64 bytes)  │ │  (256 bytes) │            │
 │  └──────────────┘ └──────────────┘ └──────────────┘            │
 │              │              │              │                     │
 │              ▼              ▼              ▼                     │
 │  ┌─────────────────────────────────────────────────┐            │
 │  │  DSP Effects Chain                               │            │
-│  │  Reverb (exp decay) │ Delay │ Filter │ Chorus   │            │
+│  │  Delay | LowPassFilter | StateVariableFilter      │            │
 │  │  All parametric — no impulse response samples    │            │
 │  └─────────────────────────────────────────────────┘            │
 │                                                                   │
@@ -57,12 +57,13 @@ The playback device synthesizes the audio in real-time from these descriptions �
 
 ## Synthesis Engines
 
-### FM Synthesis (4-operator)
+### FM Synthesis (2-operator)
 
-Yamaha DX7-style frequency modulation. Each operator is a sine oscillator with frequency ratio, modulation index, envelope (ADSR), and feedback.
+2-operator frequency modulation synthesis. Operator 1 modulates operator 0 (carrier). Each operator has a frequency ratio, modulation index, ADSR envelope, and output level. The patch struct holds 4 operator slots for forward compatibility, but only operators 0 and 1 are active in the current render path; operators 2 and 3 have zero level.
 
 ```
-Patch size: 32 bytes (4 operators × 8 bytes each)
+Patch size: 32 bytes (4 operator slots × 8 bytes each)
+Active operators: 2 (operator[1] modulates operator[0])
 Polyphony: 64 voices on Cortex-A76 (Pi 5)
 Complexity: O(operators × samples) per voice
 ```
@@ -78,7 +79,7 @@ Quality: Arbitrary precision (more harmonics = richer)
 
 ### Subtractive Synthesis
 
-Oscillator (saw/square/pulse) → Filter (resonant LP/HP/BP) → Envelope. Classic analog synth model.
+Oscillator (saw/square/pulse/triangle/noise) → StateVariableFilter → Amplitude envelope. Classic analog synth model.
 
 ```
 Patch size: 24 bytes (osc + filter + env)
@@ -87,7 +88,7 @@ Efficiency: Cheapest per-sample cost
 
 ### Wavetable Synthesis
 
-Single-cycle waveform (256 samples) with interpolation and morphing.
+Single-cycle waveform (256 samples) with linear interpolation.
 
 ```
 Patch size: 256 bytes (single cycle, can be procedurally generated)
@@ -119,39 +120,72 @@ Compact binary score format inspired by MIDI but optimized for size:
 └──────────────────────────────────────────────────┘
 ```
 
+### Event Kinds
+
+| Kind | Status | Notes |
+|------|--------|-------|
+| NoteOn | Implemented | velocity=0 treated as NoteOff |
+| NoteOff | Implemented | Triggers release phase |
+| PitchBend | Planned | Enum variant exists; not yet processed |
+| ControlChange | Planned | Enum variant exists; not yet processed |
+
 ### Size Comparison
 
 | Content | WAV | MP3 | MIDI | ALICE-Synth |
 |---------|-----|-----|------|-------------|
 | 3-min BGM | 30 MB | 3 MB | 20 KB | **2 KB** |
-| Explosion SE | 200 KB | 20 KB | — | **48 bytes** |
-| Footstep SE | 50 KB | 5 KB | — | **24 bytes** |
-| UI click | 10 KB | 1 KB | — | **8 bytes** |
 | Full anime episode audio | 50 MB | 5 MB | N/A | **~5 KB** |
 
-## Sound Effects (Procedural SE)
+## DSP Effects
 
-Sound effects are generated from mathematical descriptions rather than recorded samples:
+All effects are mathematically defined — no sample data required.
 
-| Effect | Formula | Params | Size |
-|--------|---------|--------|------|
-| Explosion | White noise → exp decay → LP filter sweep | decay_ms, filter_freq, resonance | 12 bytes |
-| Footstep | Noise burst → band-pass → short decay | material, weight, surface | 8 bytes |
-| Sword swing | Sine sweep (high→low) + noise burst | speed, length, material | 10 bytes |
-| Rain | Filtered noise + random drop triggers | density, drop_size, surface | 8 bytes |
-| Engine | FM synthesis + vibrato + harmonics | rpm, load, exhaust_type | 16 bytes |
+### Delay
+
+Circular buffer delay with configurable feedback and wet/dry mix.
+
+```rust
+let delay = Delay::from_ms(250.0, sample_rate, 0.4, 0.5);
+```
+
+### LowPassFilter
+
+One-pole IIR low-pass filter. Efficient single-multiply-per-sample implementation.
+
+```
+y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+Size: 8 bytes
+```
+
+### StateVariableFilter (SVF)
+
+Resonant 2-pole state-variable filter with simultaneous low-pass, band-pass, and high-pass outputs. Used internally for subtractive synthesis voice filtering.
+
+```
+Outputs: (low, band, high) simultaneously
+Size: 12 bytes
+Default Effect output: low-pass
+```
+
+```rust
+let mut svf = StateVariableFilter::new(cutoff_hz, resonance, sample_rate);
+let (low, band, high) = svf.process_svf(input_sample);
+```
 
 ## API Design
 
 ```rust
-use alice_synth::{Synthesizer, Score, Patch, FmPatch};
+use alice_synth::{Synthesizer, Score, Patch, FmPatch, AdditivePatch};
 
 // Create synthesizer (no_std compatible)
 let mut synth = Synthesizer::new(44100); // sample rate
 
-// Load instrument patches (32 bytes each)
-let piano = FmPatch::electric_piano();
-let strings = Patch::additive_strings();
+// Control master volume [0.0, 1.0] (default: 0.8)
+synth.master_volume = 0.8;
+
+// Load instrument patches
+let piano = Patch::Fm(FmPatch::electric_piano());
+let strings = Patch::Additive(AdditivePatch::strings());
 synth.load_patch(0, piano);
 synth.load_patch(1, strings);
 
@@ -159,17 +193,26 @@ synth.load_patch(1, strings);
 let score = Score::from_bytes(&score_data)?;
 synth.load_score(&score);
 
-// Render to buffer (real-time or offline)
-let mut buffer = [0i16; 1024];
+// Trigger notes directly
+synth.note_on(0, 60, 100); // channel, MIDI note, velocity
+synth.note_off(0, 60);
+
+// Render to f32 buffer (real-time or offline)
+let mut buffer = [0.0f32; 1024];
 synth.render(&mut buffer); // Fill 1024 samples
 
-// Procedural sound effect (one-shot)
-let explosion = synth.trigger_se(SE::explosion(
-    decay_ms: 800,
-    filter_hz: 2000,
-    resonance: 0.7,
-));
+// Render to i16 PCM buffer
+let mut buffer_i16 = [0i16; 1024];
+synth.render_i16(&mut buffer_i16);
 ```
+
+## Voice Stealing
+
+The synthesizer maintains a pool of 64 voices. When all voices are active and a new note-on arrives, the engine steals the voice with the lowest current amplitude (computed as `amp_env.level() * velocity`). This minimizes audible artifacts by silencing the quietest active note.
+
+## Master Volume
+
+`Synthesizer::master_volume` is a public `f32` field in `[0.0, 1.0]`. It scales the final mixed output before writing to the render buffer. Default value is `0.8`.
 
 ## Ecosystem Integration
 
@@ -184,7 +227,7 @@ ALICE-Streaming-Protocol ── multiplexed audio+video ──▶ Network
 
 | Bridge | Direction | Data |
 |--------|-----------|------|
-| Animation → Synth | Score + SE triggers per cut | 2 KB score + event list |
+| Animation → Synth | Score per cut | 2 KB score |
 | Voice → Synth | Timing sync (dialogue ↔ BGM ducking) | Envelope follower |
 | Synth → Streaming | Multiplexed in ASP packet | Score bytes (not PCM) |
 | Edge → Synth | Sensor data → sonification | Pitch/volume mapping |
@@ -205,9 +248,28 @@ ALICE-Streaming-Protocol ── multiplexed audio+video ──▶ Network
 |---------|-------------|-------------|
 | *(default)* | None | Core synth engine, no_std, zero alloc |
 | `std` | std | File I/O, Vec-based buffers |
-| `midi` | std | MIDI file import/export |
-| `streaming` | libasp | ALICE Streaming Protocol integration |
-| `animation` | std | ALICE-Animation bridge (score + SE triggers) |
+| `midi` | std | MIDI file import/export (Planned) |
+| `streaming` | libasp | ALICE Streaming Protocol integration (Planned) |
+| `animation` | std | ALICE-Animation bridge (Planned) |
+
+Note: `midi`, `streaming`, and `animation` feature flags are declared in `Cargo.toml` but have no implementation code yet. Enabling them currently has no effect beyond enabling `std`.
+
+## Tests
+
+The library ships with 100 unit tests covering all modules:
+
+| Module | Tests |
+|--------|-------|
+| `oscillator` | 23 |
+| `envelope` | 16 |
+| `score` | 16 |
+| `effects` | 15 |
+| `patch` | 15 |
+| `synth` | 15 |
+
+```
+cargo test
+```
 
 ## License
 
