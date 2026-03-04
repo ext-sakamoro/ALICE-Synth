@@ -26,17 +26,20 @@ impl ScoreHeader {
 
     /// Ticks per second at current tempo
     #[inline(always)]
+    #[must_use]
     pub fn ticks_per_second(&self) -> f32 {
         const RCP_60: f32 = 1.0 / 60.0;
         self.tempo_bpm as f32 * RCP_60 * self.tick_div as f32
     }
 
     /// Samples per tick at given sample rate
+    #[must_use]
     pub fn samples_per_tick(&self, sample_rate: f32) -> f32 {
         sample_rate / self.ticks_per_second()
     }
 
     /// Serialize to 8 bytes
+    #[must_use]
     pub fn to_bytes(&self) -> [u8; 8] {
         let mut buf = [0u8; 8];
         buf[0..4].copy_from_slice(&Self::MAGIC);
@@ -47,6 +50,7 @@ impl ScoreHeader {
     }
 
     /// Deserialize from 8 bytes
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 8 || data[0..4] != Self::MAGIC {
             return None;
@@ -73,6 +77,7 @@ pub enum NoteEventKind {
 }
 
 impl NoteEventKind {
+    #[must_use]
     pub fn from_u8(v: u8) -> Self {
         match v & 0x03 {
             0 => Self::NoteOn,
@@ -85,7 +90,7 @@ impl NoteEventKind {
 
 /// Compact note event — 4 bytes
 ///
-/// Layout: \[delta_tick:12\]\[channel:4\]\[note:7\]\[velocity:7\]\[kind:2\]
+/// Layout: \[`delta_tick:12`\]\[channel:4\]\[note:7\]\[velocity:7\]\[kind:2\]
 /// = 32 bits = 4 bytes per event
 #[derive(Debug, Clone, Copy)]
 pub struct NoteEvent {
@@ -103,6 +108,7 @@ pub struct NoteEvent {
 
 impl NoteEvent {
     /// Pack into 4 bytes
+    #[must_use]
     pub fn to_bytes(&self) -> [u8; 4] {
         let mut bits: u32 = 0;
         bits |= (self.delta_tick as u32 & 0xFFF) << 20;
@@ -114,6 +120,7 @@ impl NoteEvent {
     }
 
     /// Unpack from 4 bytes
+    #[must_use]
     pub fn from_bytes(data: &[u8; 4]) -> Self {
         let bits = u32::from_le_bytes(*data);
         Self {
@@ -134,6 +141,7 @@ pub struct Score {
 }
 
 impl Score {
+    #[must_use]
     pub fn new(tempo_bpm: u16, tracks: u8) -> Self {
         Self {
             header: ScoreHeader {
@@ -151,11 +159,13 @@ impl Score {
     }
 
     /// Total size in bytes
+    #[must_use]
     pub fn size_bytes(&self) -> usize {
         8 + self.events.len() * 4
     }
 
     /// Serialize to bytes
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.size_bytes());
         buf.extend_from_slice(&self.header.to_bytes());
@@ -166,6 +176,7 @@ impl Score {
     }
 
     /// Deserialize from bytes
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         let header = ScoreHeader::from_bytes(data)?;
         let event_data = &data[8..];
@@ -185,12 +196,14 @@ impl Score {
     }
 
     /// Total duration in ticks
+    #[must_use]
     pub fn total_ticks(&self) -> u32 {
         self.events.iter().map(|e| e.delta_tick as u32).sum()
     }
 
     /// Total duration in seconds
     #[inline(always)]
+    #[must_use]
     pub fn duration_secs(&self) -> f32 {
         let tps = self.header.ticks_per_second();
         if tps > 0.0 {

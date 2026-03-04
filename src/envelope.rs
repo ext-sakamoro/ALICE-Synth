@@ -7,11 +7,12 @@
 
 /// ADSR envelope parameters
 ///
-/// Times are in samples (not seconds) for deterministic no_std operation.
+/// Times are in samples (not seconds) for deterministic `no_std` operation.
 /// Sustain level is in [0.0, 1.0].
 ///
 /// Size: 16 bytes
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub struct Adsr {
     /// Attack time in samples
     pub attack: u32,
@@ -25,6 +26,7 @@ pub struct Adsr {
 
 impl Adsr {
     /// Create ADSR from time in milliseconds
+    #[must_use]
     pub fn from_ms(
         attack_ms: f32,
         decay_ms: f32,
@@ -44,16 +46,19 @@ impl Adsr {
     }
 
     /// Quick percussive envelope (good for drums/SE)
+    #[must_use]
     pub fn percussive(attack_ms: f32, decay_ms: f32, sample_rate: f32) -> Self {
         Self::from_ms(attack_ms, decay_ms, 0.0, decay_ms, sample_rate)
     }
 
     /// Organ-style envelope (instant attack, full sustain)
+    #[must_use]
     pub fn organ(sample_rate: f32) -> Self {
         Self::from_ms(1.0, 1.0, 1.0, 10.0, sample_rate)
     }
 
     /// Piano-style envelope
+    #[must_use]
     pub fn piano(sample_rate: f32) -> Self {
         Self::from_ms(5.0, 200.0, 0.3, 500.0, sample_rate)
     }
@@ -92,6 +97,7 @@ impl Default for AdsrState {
 }
 
 impl AdsrState {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -111,16 +117,19 @@ impl AdsrState {
     }
 
     /// Is this envelope still producing output?
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.phase != AdsrPhase::Idle
     }
 
     /// Current output level
+    #[must_use]
     pub fn level(&self) -> f32 {
         self.level
     }
 
     /// Current phase
+    #[must_use]
     pub fn phase(&self) -> AdsrPhase {
         self.phase
     }

@@ -1,6 +1,6 @@
 [package]
 name = "alice-synth"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Moroya Sakamoto"]
 description = "Procedural Audio Synthesizer — Don't send waveforms, send the score"
@@ -17,11 +17,14 @@ path = "src/lib.rs"
 [features]
 default = []
 std = []
+ffi = ["std"]                    # C/C++/C# FFI bindings
+python = ["pyo3", "std"]          # Python bindings via PyO3
 midi = ["std"]                    # MIDI file import/export
 streaming = ["std"]               # ALICE Streaming Protocol integration (future)
 animation = ["std"]               # ALICE-Animation lip-sync bridge
 
 [dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 # libasp = { path = "../ALICE-Streaming-Protocol", optional = true, default-features = false }
 
 [profile.release]

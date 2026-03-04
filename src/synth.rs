@@ -90,7 +90,7 @@ impl Voice {
 pub struct Synthesizer {
     /// Audio sample rate
     sample_rate: f32,
-    /// Pre-computed reciprocal of sample_rate — eliminates per-sample divisions
+    /// Pre-computed reciprocal of `sample_rate` — eliminates per-sample divisions
     inv_sample_rate: f32,
     /// Voice pool
     voices: Vec<Voice>,
@@ -106,11 +106,12 @@ pub struct Synthesizer {
     tick_accum: f32,
     /// Samples per tick (computed from score header)
     samples_per_tick: f32,
-    /// Pre-computed reciprocal of samples_per_tick — avoids per-sample division in sequencer
+    /// Pre-computed reciprocal of `samples_per_tick` — avoids per-sample division in sequencer
     inv_samples_per_tick: f32,
 }
 
 impl Synthesizer {
+    #[must_use]
     pub fn new(sample_rate: u32) -> Self {
         let mut voices = Vec::with_capacity(MAX_VOICES);
         for _ in 0..MAX_VOICES {
@@ -244,6 +245,7 @@ impl Synthesizer {
     }
 
     /// Number of currently active voices
+    #[must_use]
     pub fn active_voice_count(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }

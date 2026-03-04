@@ -13,7 +13,7 @@ const TWO_PI: f32 = 2.0 * PI;
 /// Reciprocal of 32768 — noise normalization, avoids per-sample division
 const RCP_32768: f32 = 1.0 / 32768.0;
 
-/// Reciprocal of 12 — used in midi_to_freq semitone conversion
+/// Reciprocal of 12 — used in `midi_to_freq` semitone conversion
 const RCP_12: f32 = 1.0 / 12.0;
 
 /// no_std-compatible floor function
@@ -40,9 +40,9 @@ pub enum Waveform {
 }
 
 impl Waveform {
+    #[must_use]
     pub fn from_u8(v: u8) -> Self {
         match v {
-            0 => Self::Sine,
             1 => Self::Saw,
             2 => Self::Square,
             3 => Self::Triangle,
@@ -55,7 +55,7 @@ impl Waveform {
 /// Phase-accumulator oscillator
 ///
 /// Generates waveforms at arbitrary frequency with minimal state.
-/// Total state: 8 bytes (phase f32 + noise_state u32).
+/// Total state: 8 bytes (phase f32 + `noise_state` u32).
 pub struct Oscillator {
     /// Current phase [0.0, 1.0)
     phase: f32,
@@ -66,6 +66,7 @@ pub struct Oscillator {
 }
 
 impl Oscillator {
+    #[must_use]
     pub fn new(waveform: Waveform) -> Self {
         Self {
             phase: 0.0,
@@ -146,10 +147,11 @@ impl Oscillator {
 
 /// Fast sine approximation (Bhaskara I, ~0.1% error)
 ///
-/// Avoids libm dependency for no_std targets.
-/// The rational division is unavoidable (one div per call), but TWO_PI
+/// Avoids libm dependency for `no_std` targets.
+/// The rational division is unavoidable (one div per call), but `TWO_PI`
 /// is a constant so no runtime multiply is needed for normalization.
 #[inline(always)]
+#[must_use]
 pub fn sin_approx(x: f32) -> f32 {
     // Normalize to [0, 2π)
     let x = x % TWO_PI;
@@ -167,13 +169,14 @@ pub fn sin_approx(x: f32) -> f32 {
 /// Convert MIDI note number to frequency (Hz)
 ///
 /// A4 (note 69) = 440 Hz
-/// RCP_12 replaces the / 12.0 division in semitone computation.
+/// `RCP_12` replaces the / 12.0 division in semitone computation.
 #[inline(always)]
+#[must_use]
 pub fn midi_to_freq(note: u8) -> f32 {
     440.0 * pow2_approx((note as f32 - 69.0) * RCP_12)
 }
 
-/// Fast 2^x approximation for no_std
+/// Fast 2^x approximation for `no_std`
 ///
 /// Uses integer bit manipulation + polynomial approximation.
 #[inline(always)]
@@ -185,7 +188,7 @@ fn pow2_approx(x: f32) -> f32 {
 
     // 2^frac approximation (linear: good enough for ±6 semitones)
     let frac_approx =
-        1.0 + frac * (core::f32::consts::LN_2 + frac * (0.2402265 + frac * 0.0558011));
+        1.0 + frac * (core::f32::consts::LN_2 + frac * (0.240_226_5 + frac * 0.055_801_1));
 
     // 2^int via IEEE 754 exponent field manipulation
     let bits = ((127 + int_part) as u32) << 23;

@@ -29,6 +29,7 @@ pub enum Patch {
 }
 
 impl Patch {
+    #[must_use]
     pub fn synth_type(&self) -> SynthType {
         match self {
             Patch::Fm(_) => SynthType::Fm,
@@ -68,6 +69,7 @@ pub struct FmOperator {
 
 impl FmPatch {
     /// Classic electric piano patch (DX7 "E.PIANO 1" inspired)
+    #[must_use]
     pub fn electric_piano() -> Self {
         let sr = 44100.0;
         Self {
@@ -103,6 +105,7 @@ impl FmPatch {
     }
 
     /// Simple bell patch
+    #[must_use]
     pub fn bell() -> Self {
         let sr = 44100.0;
         Self {
@@ -151,6 +154,7 @@ pub struct AdditivePatch {
 
 impl AdditivePatch {
     /// Organ-like sound (odd harmonics)
+    #[must_use]
     pub fn organ() -> Self {
         let sr = 44100.0;
         Self {
@@ -162,6 +166,7 @@ impl AdditivePatch {
     }
 
     /// String-like sound (all harmonics with 1/n rolloff)
+    #[must_use]
     pub fn strings() -> Self {
         let sr = 44100.0;
         let mut harmonics = [0.0f32; 16];
@@ -196,6 +201,7 @@ pub struct SubtractivePatch {
 
 impl SubtractivePatch {
     /// Classic bass sound
+    #[must_use]
     pub fn bass() -> Self {
         let sr = 44100.0;
         Self {
@@ -209,6 +215,7 @@ impl SubtractivePatch {
     }
 
     /// Pluck/stab sound
+    #[must_use]
     pub fn pluck() -> Self {
         let sr = 44100.0;
         Self {
@@ -246,6 +253,7 @@ impl WavetablePatch {
 
     /// Look up value with linear interpolation
     #[inline]
+    #[must_use]
     pub fn lookup(&self, phase: f32) -> f32 {
         let idx_f = phase * 256.0;
         let idx0 = idx_f as usize % 256;

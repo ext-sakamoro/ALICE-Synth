@@ -35,6 +35,7 @@ pub struct Delay {
 
 impl Delay {
     /// Create delay with given time in samples
+    #[must_use]
     pub fn new(delay_samples: usize, feedback: f32, mix: f32) -> Self {
         Self {
             buffer: vec![0.0; delay_samples.max(1)],
@@ -45,6 +46,7 @@ impl Delay {
     }
 
     /// Create delay from milliseconds
+    #[must_use]
     pub fn from_ms(delay_ms: f32, sample_rate: f32, feedback: f32, mix: f32) -> Self {
         const RCP_1000: f32 = 1.0 / 1000.0;
         let samples = (delay_ms * sample_rate * RCP_1000) as usize;
@@ -80,6 +82,7 @@ pub struct LowPassFilter {
 impl LowPassFilter {
     /// Create from cutoff frequency
     #[inline(always)]
+    #[must_use]
     pub fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
         let rc = (2.0 * core::f32::consts::PI * cutoff_hz).recip();
         let dt = sample_rate.recip();
@@ -122,6 +125,7 @@ pub struct StateVariableFilter {
 }
 
 impl StateVariableFilter {
+    #[must_use]
     pub fn new(cutoff_hz: f32, resonance: f32, sample_rate: f32) -> Self {
         let f = 2.0 * sin_approx(core::f32::consts::PI * cutoff_hz * sample_rate.recip());
         let damp = (1.0 - resonance.clamp(0.0, 0.99)).max(0.01);
@@ -162,7 +166,7 @@ impl Effect for StateVariableFilter {
 
 /// Simple reverb — Schroeder allpass + comb filter network
 ///
-/// Parametric: decay_time + room_size, no IR samples.
+/// Parametric: `decay_time` + `room_size`, no IR samples.
 pub struct Reverb {
     comb_buffers: [Vec<f32>; 4],
     comb_pos: [usize; 4],
@@ -174,11 +178,12 @@ pub struct Reverb {
 
 impl Reverb {
     /// Create reverb with room size and decay time
+    #[must_use]
     pub fn new(sample_rate: f32, room_size: f32, decay: f32, mix: f32) -> Self {
+        const RCP_44100: f32 = 1.0 / 44100.0;
+
         let base_delays = [1116, 1188, 1277, 1356]; // Schroeder delays
         let allpass_delays = [556, 441];
-
-        const RCP_44100: f32 = 1.0 / 44100.0;
         let scale = room_size.clamp(0.1, 2.0);
         // Multiply by RCP_44100 instead of dividing by 44100 — both computed once at init
         let scale_sr = scale * sample_rate * RCP_44100;
@@ -233,10 +238,14 @@ impl Effect for Reverb {
 
     fn reset(&mut self) {
         for buf in &mut self.comb_buffers {
-            buf.iter_mut().for_each(|s| *s = 0.0);
+            for s in buf.iter_mut() {
+                *s = 0.0;
+            }
         }
         for buf in &mut self.allpass_buffers {
-            buf.iter_mut().for_each(|s| *s = 0.0);
+            for s in buf.iter_mut() {
+                *s = 0.0;
+            }
         }
         self.comb_pos = [0; 4];
         self.allpass_pos = [0; 2];

@@ -248,15 +248,26 @@ ALICE-Streaming-Protocol ── multiplexed audio+video ──▶ Network
 |---------|-------------|-------------|
 | *(default)* | None | Core synth engine, no_std, zero alloc |
 | `std` | std | File I/O, Vec-based buffers |
+| `ffi` | std | C/C++/C# FFI — 20 `extern "C"` functions |
+| `python` | pyo3, std | PyO3 Python bindings — 4 classes + 2 functions |
 | `midi` | std | MIDI file import/export (Planned) |
 | `streaming` | libasp | ALICE Streaming Protocol integration (Planned) |
 | `animation` | std | ALICE-Animation bridge (Planned) |
 
 Note: `midi`, `streaming`, and `animation` feature flags are declared in `Cargo.toml` but have no implementation code yet. Enabling them currently has no effect beyond enabling `std`.
 
+## FFI & Language Bindings
+
+| Target | Path | Functions |
+|--------|------|-----------|
+| C-ABI (FFI) | `src/ffi.rs` | 20 `extern "C"` functions |
+| Python (PyO3) | `src/python.rs` | 4 classes + 2 functions |
+| Unity (C#) | `bindings/unity/AliceSynth.cs` | `Synthesizer`, `OscillatorHandle` (IDisposable) |
+| UE5 (C++) | `bindings/ue5/AliceSynth.h` | `FSynthesizer`, `FOscillator` (RAII) |
+
 ## Tests
 
-The library ships with 100 unit tests covering all modules:
+The library ships with 120 tests (100 core + 19 FFI + 1 doctest):
 
 | Module | Tests |
 |--------|-------|
@@ -266,9 +277,11 @@ The library ships with 100 unit tests covering all modules:
 | `effects` | 15 |
 | `patch` | 15 |
 | `synth` | 15 |
+| `ffi` | 19 |
+| doctest | 1 |
 
 ```
-cargo test
+cargo test --features ffi
 ```
 
 ## License

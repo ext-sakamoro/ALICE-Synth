@@ -2,6 +2,16 @@
 
 All notable changes to ALICE-Synth will be documented in this file.
 
+## [0.1.1] - 2026-03-04
+
+### Added
+- `ffi` module — 20 `extern "C"` functions for C/C++/C# interop (`feature = "ffi"`)
+- `python` module — PyO3 bindings: 4 classes + 2 functions (`feature = "python"`)
+- Unity C# bindings (`bindings/unity/AliceSynth.cs`) — `IDisposable` wrappers
+- UE5 C++ header (`bindings/ue5/AliceSynth.h`) — RAII `FSynthesizer` / `FOscillator`
+- 19 FFI tests, PyO3 compilation check
+- `#[repr(C)]` on `Adsr` struct for FFI safety
+
 ## [0.1.0] - 2026-02-23
 
 ### Added

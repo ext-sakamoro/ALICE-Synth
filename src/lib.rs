@@ -21,6 +21,8 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `std` | no | Standard library support |
+//! | `ffi` | no | C/C++/C# FFI — 20 `extern "C"` functions |
+//! | `python` | no | PyO3 Python bindings — 4 classes + 2 functions |
 //! | `midi` | no | MIDI file import/export (future) |
 //! | `streaming` | no | ALICE Streaming Protocol integration (future) |
 //! | `animation` | no | ALICE-Animation lip-sync bridge (future) |
@@ -57,6 +59,16 @@
 //!
 //! Author: Moroya Sakamoto
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::similar_names,
+    clippy::many_single_char_names,
+    clippy::module_name_repetitions,
+    clippy::inline_always
+)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(not(feature = "std"))]
@@ -64,8 +76,12 @@ extern crate alloc;
 
 pub mod effects;
 pub mod envelope;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 pub mod oscillator;
 pub mod patch;
+#[cfg(feature = "python")]
+pub mod python;
 pub mod score;
 pub mod synth;
 
