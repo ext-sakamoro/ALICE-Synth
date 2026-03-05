@@ -22,7 +22,7 @@
 //! |---------|---------|-------------|
 //! | `std` | no | Standard library support |
 //! | `ffi` | no | C/C++/C# FFI — 20 `extern "C"` functions |
-//! | `python` | no | PyO3 Python bindings — 4 classes + 2 functions |
+//! | `python` | no | `PyO3` Python bindings — 4 classes + 2 functions |
 //! | `midi` | no | MIDI file import/export (future) |
 //! | `streaming` | no | ALICE Streaming Protocol integration (future) |
 //! | `animation` | no | ALICE-Animation lip-sync bridge (future) |

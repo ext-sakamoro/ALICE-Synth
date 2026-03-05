@@ -30,12 +30,12 @@ pub enum Patch {
 
 impl Patch {
     #[must_use]
-    pub fn synth_type(&self) -> SynthType {
+    pub const fn synth_type(&self) -> SynthType {
         match self {
-            Patch::Fm(_) => SynthType::Fm,
-            Patch::Additive(_) => SynthType::Additive,
-            Patch::Subtractive(_) => SynthType::Subtractive,
-            Patch::Wavetable(_) => SynthType::Wavetable,
+            Self::Fm(_) => SynthType::Fm,
+            Self::Additive(_) => SynthType::Additive,
+            Self::Subtractive(_) => SynthType::Subtractive,
+            Self::Wavetable(_) => SynthType::Wavetable,
         }
     }
 }
@@ -273,6 +273,7 @@ impl WavetablePatch {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use core::f32::consts::PI;
@@ -379,9 +380,9 @@ mod tests {
         let adsr = crate::envelope::Adsr::organ(44100.0);
         let wt = WavetablePatch::from_fn(|phase| (phase * 2.0 * PI).sin(), adsr);
         // Verify that all 256 samples are within [-1, 1]
-        for &s in wt.table.iter() {
+        for &s in &wt.table {
             assert!(
-                s >= -1.001 && s <= 1.001,
+                (-1.001..=1.001).contains(&s),
                 "wavetable sample out of range: {s}"
             );
         }

@@ -78,7 +78,7 @@ pub enum NoteEventKind {
 
 impl NoteEventKind {
     #[must_use]
-    pub fn from_u8(v: u8) -> Self {
+    pub const fn from_u8(v: u8) -> Self {
         match v & 0x03 {
             0 => Self::NoteOn,
             1 => Self::NoteOff,
@@ -109,7 +109,7 @@ pub struct NoteEvent {
 impl NoteEvent {
     /// Pack into 4 bytes
     #[must_use]
-    pub fn to_bytes(&self) -> [u8; 4] {
+    pub const fn to_bytes(&self) -> [u8; 4] {
         let mut bits: u32 = 0;
         bits |= (self.delta_tick as u32 & 0xFFF) << 20;
         bits |= ((self.channel & 0x0F) as u32) << 16;
@@ -121,7 +121,7 @@ impl NoteEvent {
 
     /// Unpack from 4 bytes
     #[must_use]
-    pub fn from_bytes(data: &[u8; 4]) -> Self {
+    pub const fn from_bytes(data: &[u8; 4]) -> Self {
         let bits = u32::from_le_bytes(*data);
         Self {
             delta_tick: ((bits >> 20) & 0xFFF) as u16,
@@ -142,7 +142,7 @@ pub struct Score {
 
 impl Score {
     #[must_use]
-    pub fn new(tempo_bpm: u16, tracks: u8) -> Self {
+    pub const fn new(tempo_bpm: u16, tracks: u8) -> Self {
         Self {
             header: ScoreHeader {
                 tempo_bpm,
@@ -160,7 +160,7 @@ impl Score {
 
     /// Total size in bytes
     #[must_use]
-    pub fn size_bytes(&self) -> usize {
+    pub const fn size_bytes(&self) -> usize {
         8 + self.events.len() * 4
     }
 

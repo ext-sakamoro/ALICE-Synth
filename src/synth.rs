@@ -411,6 +411,7 @@ fn render_wavetable_voice(voice: &mut Voice, patch: &WavetablePatch, inv_sample_
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp, clippy::large_stack_arrays)]
 mod tests {
     use super::*;
     use crate::patch::FmPatch;
@@ -592,8 +593,8 @@ mod tests {
         let mut buf = [0i16; 512];
         synth.render_i16(&mut buf);
         // All samples must be in i16 range (no wrapping overflow)
-        for &s in buf.iter() {
-            assert!(s >= i16::MIN && s <= i16::MAX);
+        for &s in &buf {
+            assert!((i16::MIN..=i16::MAX).contains(&s));
         }
     }
 

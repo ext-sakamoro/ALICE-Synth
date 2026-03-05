@@ -103,7 +103,7 @@ impl AdsrState {
     }
 
     /// Trigger note-on
-    pub fn note_on(&mut self) {
+    pub const fn note_on(&mut self) {
         self.phase = AdsrPhase::Attack;
         self.counter = 0;
     }
@@ -124,13 +124,13 @@ impl AdsrState {
 
     /// Current output level
     #[must_use]
-    pub fn level(&self) -> f32 {
+    pub const fn level(&self) -> f32 {
         self.level
     }
 
     /// Current phase
     #[must_use]
-    pub fn phase(&self) -> AdsrPhase {
+    pub const fn phase(&self) -> AdsrPhase {
         self.phase
     }
 
@@ -210,6 +210,7 @@ impl AdsrState {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -226,8 +227,8 @@ mod tests {
 
         // Attack phase: should ramp from 0 to 1
         let mut levels = [0.0f32; 10];
-        for i in 0..10 {
-            levels[i] = state.next(&params);
+        for level in &mut levels {
+            *level = state.next(&params);
         }
         assert!(levels[0] < 0.2, "start of attack should be low");
         assert!(levels[9] > 0.8, "end of attack should be high");

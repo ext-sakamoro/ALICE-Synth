@@ -41,7 +41,7 @@ pub enum Waveform {
 
 impl Waveform {
     #[must_use]
-    pub fn from_u8(v: u8) -> Self {
+    pub const fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Saw,
             2 => Self::Square,
@@ -67,7 +67,7 @@ pub struct Oscillator {
 
 impl Oscillator {
     #[must_use]
-    pub fn new(waveform: Waveform) -> Self {
+    pub const fn new(waveform: Waveform) -> Self {
         Self {
             phase: 0.0,
             waveform,
@@ -76,7 +76,7 @@ impl Oscillator {
     }
 
     /// Reset phase to zero
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.phase = 0.0;
     }
 
@@ -218,13 +218,13 @@ mod tests {
         let mut osc = Oscillator::new(Waveform::Sine);
         let inv_sr = 1.0_f32 / 44100.0;
         let mut samples = [0.0f32; 100];
-        for s in samples.iter_mut() {
+        for s in &mut samples {
             *s = osc.next_sample(440.0, inv_sr);
         }
         // First sample should be near zero (sin(0))
         assert!(samples[0].abs() < 0.1);
         // Should have values in [-1, 1]
-        assert!(samples.iter().all(|&s| s >= -1.01 && s <= 1.01));
+        assert!(samples.iter().all(|&s| (-1.01..=1.01).contains(&s)));
     }
 
     #[test]
@@ -249,12 +249,12 @@ mod tests {
         let mut osc = Oscillator::new(Waveform::Noise);
         let inv_sr = 1.0_f32 / 44100.0;
         let mut samples = [0.0f32; 100];
-        for s in samples.iter_mut() {
+        for s in &mut samples {
             *s = osc.next_sample(44100.0, inv_sr);
         }
         // Noise should have variety
-        let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min = samples.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         assert!(max - min > 0.5, "noise should have spread");
     }
 
@@ -338,7 +338,7 @@ mod tests {
         let inv_sr = 1.0_f32 / 44100.0;
         for _ in 0..500 {
             let s = osc.next_sample(440.0, inv_sr);
-            assert!(s >= -1.0 && s <= 1.0, "triangle out of range: {s}");
+            assert!((-1.0..=1.0).contains(&s), "triangle out of range: {s}");
         }
     }
 
@@ -389,7 +389,7 @@ mod tests {
         let inv_sr = 1.0_f32 / 44100.0;
         for _ in 0..500 {
             let s = osc.next_sample_fm(440.0, inv_sr, 0.5);
-            assert!(s >= -1.01 && s <= 1.01, "FM output out of range: {s}");
+            assert!((-1.01..=1.01).contains(&s), "FM output out of range: {s}");
         }
     }
 
@@ -445,12 +445,12 @@ mod tests {
         let mut osc = Oscillator::new(Waveform::Noise);
         let inv_sr = 1.0_f32 / 44100.0;
         let mut samples = [0.0f32; 1000];
-        for s in samples.iter_mut() {
+        for s in &mut samples {
             *s = osc.next_sample(440.0, inv_sr);
         }
         // Verify the noise covers at least a 1.0 range of values
-        let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min = samples.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         assert!(
             max - min > 1.0,
             "noise should span a wide range, spread={}",
