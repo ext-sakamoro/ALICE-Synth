@@ -78,6 +78,8 @@ pub mod effects;
 pub mod envelope;
 #[cfg(feature = "ffi")]
 pub mod ffi;
+#[cfg(feature = "midi")]
+pub mod midi;
 pub mod oscillator;
 pub mod patch;
 #[cfg(feature = "python")]
