@@ -2,7 +2,7 @@
 name = "alice-synth"
 version = "0.1.1"
 edition = "2021"
-authors = ["Moroya Sakamoto"]
+authors = ["Moroya Sakamoto <sakamoro@alicelaw.net>"]
 description = "Procedural Audio Synthesizer — Don't send waveforms, send the score"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ext-sakamoro/ALICE-Synth"
