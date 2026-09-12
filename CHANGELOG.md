@@ -4,7 +4,7 @@ All notable changes to ALICE-Synth will be documented in this file.
 
 ## [0.2.0-dev] - 2026-09-12
 
-### Added
+### Added — Phase 1 (initial ABC parser)
 - `abc` module — ABC notation parser for YuE2-style symbolic planning (`feature = "abc"`)
   - Parses header fields `M:` `L:` `Q:` `K:` and body notes / accidentals / durations / rests / barlines
   - 15 canonical major key signatures (C, G, D, A, E, B, F#, C#, F, Bb, Eb, Ab, Db, Gb, Cb)
@@ -13,6 +13,25 @@ All notable changes to ALICE-Synth will be documented in this file.
   - `no_std + alloc` compatible, zero extra dependencies
   - 26 unit tests including Ode-to-Joy fixture + end-to-end PCM synthesis via `Synthesizer`
 - Module doc reference to YuE2 (Multimodal Art Projection × HKUST, 2026-09-10) as the canonical prior art
+
+### Added — Phase 2a (chord / repeat / tie / minor keys)
+- `MAX_CHORD_NOTES = 8` public constant + `AbcElement::Chord { notes: [u8; 8], count, num, den, tie_follows }`
+  variant — polyphonic chord support with per-note accidentals (`[^Ce_g]`) and duration modifier (`[CEG]2`)
+- `AbcElement::Note.tie_follows: bool` field for asymmetric tie tracking; consecutive same-pitch tied
+  notes are coalesced into a single `NoteOn`/`NoteOff` pair at score conversion time
+- `AbcElement::{RepeatStart, RepeatEnd, VoltaStart(u8)}` markers, consumed by parse-time
+  `unroll_repeats()` post-processing
+- Repeat unrolling: `|: X :|` → `X X`, with volta support `|: A [1 B :| [2 C |` → `A B A C`
+- 15 canonical minor key signatures (Am / Em / Bm / F#m / C#m / G#m / D#m / A#m / Dm / Gm / Cm / Fm /
+  Bbm / Ebm / Abm; both `m` and `min` suffixes accepted; total 30 key signatures)
+- 5 new `AbcError` variants: `ChordTooLarge`, `UnbalancedChord`, `NestedRepeat`,
+  `UnbalancedRepeat`, `UnsupportedVolta`
+- 19 additional unit tests (chord parsing / score conversion / repeat unroll / volta / tie chain /
+  minor keys); **total 45 abc tests, 145 crate tests**
+
+### Changed — Phase 2a (breaking, pre-1.0)
+- `AbcElement::Note` gained a required `tie_follows: bool` field. Pattern matches must add either
+  `tie_follows` or `..`. Documented in `docs/ROADMAP.md` ADR-005.
 
 ## [0.1.1] - 2026-03-04
 

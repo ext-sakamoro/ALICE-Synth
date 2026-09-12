@@ -5,23 +5,30 @@
 //! traditional tunes, and it is the same symbolic representation adopted by `YuE2` (2026-09)
 //! as the human-editable intermediate for its symbolic planning stage.
 //!
-//! # Supported subset (Phase 1 MVP)
+//! # Supported subset (through Phase 2a)
 //!
 //! - Header fields: `X:` `T:` `M:` `L:` `Q:` `K:` (only `M` `L` `Q` `K` affect output)
 //! - Body: `A-G` `a-g` note letters, `,` `'` octave modifiers, `^` `_` `=` `^^` `__` accidentals
 //! - Durations: bare (=1×L), `N` (=N×L), `/N` (=L/N), `/` (=L/2), `N/M` (=N/M×L)
 //! - Rest: `z` and `Z` with the same duration syntax
-//! - Barlines: `|` `||` `|]` `[|` `:|` `|:` (all treated as boundary markers)
-//! - Key signatures: 15 canonical major keys (C, G, D, A, E, B, F#, C#, F, Bb, Eb, Ab, Db, Gb, Cb)
+//! - Barlines: `|` `||` `|]` `[|` (as boundaries)
+//! - Chord notation: `[CEG]` up to [`MAX_CHORD_NOTES`] simultaneous notes, per-note accidentals
+//! - Ties `-`: consecutive same-pitch notes merged into a single sustained note
+//! - Repeats: `|:` … `:|` unrolled twice at parse time
+//! - Voltas: `[1` first ending / `[2` second ending inside a repeat block
+//! - Key signatures: 30 canonical keys — 15 major (C/G/D/A/E/B/F#/C#/F/Bb/Eb/Ab/Db/Gb/Cb) and
+//!   15 relative minors (Am/Em/…/Abm, accepting both `m` and `min` suffixes)
 //! - Inline fields `[K:...]` `[M:...]` — silently skipped
-//! - Structural chars `-` `[` `]` `(` `)` `{` `}` `:` `*` — silently skipped
+//! - Structural chars `(` `)` `{` `}` `*` `.` `~` `>` `<` — silently skipped
 //! - Decorations `!...!` — silently skipped
+//! - Annotations `"..."` — silently skipped
 //! - Line comments starting with `%`
 //!
-//! # Not supported (Phase 2 or later)
+//! # Not supported (Phase 2b or later)
 //!
-//! Multi-voice (`V:`), chord expansion, ties (notes are not merged), grace notes `{}`,
-//! tuplets `(3`, minor keys, mode names (dor/mix/lyd/...), microtonal accidentals.
+//! Multi-voice (`V:`), grace notes `{}`, tuplets `(3`, church modes (dor/mix/lyd/phr/loc/aeo),
+//! microtonal accidentals, chord-level tie coalescing (chord `tie_follows` is parsed but
+//! not merged), volta numbers ≥ 3.
 //!
 //! # Example
 //!
@@ -65,6 +72,16 @@ pub enum AbcError {
     DurationOverflow,
     /// Input contained no notes
     EmptyTune,
+    /// Chord exceeded the 8-note capacity
+    ChordTooLarge,
+    /// Chord `[...]` was not closed with a matching `]`
+    UnbalancedChord,
+    /// Nested `|:` inside another repeat block (not supported in Phase 2a)
+    NestedRepeat,
+    /// `|:` opened without a matching `:|`
+    UnbalancedRepeat,
+    /// `[N` volta indicator used with an unsupported number (Phase 2a supports 1..=2)
+    UnsupportedVolta,
 }
 
 /// Canonical major key signature
@@ -122,6 +139,12 @@ impl KeySignature {
     }
 }
 
+/// Maximum number of simultaneous notes in an [`AbcElement::Chord`].
+///
+/// Chosen to cover triads, seventh chords, ninth chords, and dense piano voicings
+/// while keeping `AbcElement` `Copy` and cache-line friendly.
+pub const MAX_CHORD_NOTES: usize = 8;
+
 /// A single body element of a parsed ABC tune.
 ///
 /// Durations are stored as a rational `num/den` multiplier of the header's
@@ -137,6 +160,8 @@ pub enum AbcElement {
         num: u16,
         /// Duration denominator
         den: u16,
+        /// `true` if the ABC source suffixed this note with `-` (tie)
+        tie_follows: bool,
     },
     /// A rest (silence)
     Rest {
@@ -145,8 +170,30 @@ pub enum AbcElement {
         /// Duration denominator
         den: u16,
     },
-    /// A bar boundary — informational only in Phase 1
+    /// A chord — up to [`MAX_CHORD_NOTES`] simultaneous notes sharing one duration
+    Chord {
+        /// MIDI note numbers; only the first `count` entries are valid
+        notes: [u8; MAX_CHORD_NOTES],
+        /// Number of valid entries in `notes` (`1..=MAX_CHORD_NOTES`)
+        count: u8,
+        /// Duration numerator (`num/den` × unit length)
+        num: u16,
+        /// Duration denominator
+        den: u16,
+        /// `true` if the chord was suffixed with `-`
+        ///
+        /// Chord-level tie coalescing is not yet implemented (Phase 2b); the field
+        /// is retained for round-trip fidelity and for future consumers.
+        tie_follows: bool,
+    },
+    /// A bar boundary — informational only, dropped by [`AbcTune::to_score`]
     Barline,
+    /// `|:` marker (consumed by repeat unrolling; not expected in body after parse)
+    RepeatStart,
+    /// `:|` marker (consumed by repeat unrolling; not expected in body after parse)
+    RepeatEnd,
+    /// `[N` volta start marker (consumed by repeat unrolling)
+    VoltaStart(u8),
 }
 
 /// The header fields that affect audio playback.
@@ -194,13 +241,23 @@ pub struct AbcTune {
 impl AbcTune {
     /// Convert this tune to an ALICE-Synth [`Score`] at the given tick division.
     ///
-    /// Each [`AbcElement::Note`] emits a `NoteOn` (with `delta_tick` equal to any
-    /// preceding accumulated rest) followed by a `NoteOff` whose `delta_tick` is
-    /// the note's own duration. Rests advance the running delta without emitting
-    /// events. Barlines are silently dropped.
+    /// Emission rules:
+    ///
+    /// - [`AbcElement::Note`] → `NoteOn` (delta = accumulated pending rest ticks) +
+    ///   `NoteOff` (delta = note duration). Consecutive same-pitch notes joined by
+    ///   `-` (tie) are coalesced into a single `NoteOn`/`NoteOff` pair whose duration
+    ///   is the sum of all tied notes' ticks.
+    /// - [`AbcElement::Chord`] → N `NoteOn` events (first with pending delta, rest
+    ///   with delta 0) followed by N `NoteOff` events (first with chord duration,
+    ///   rest with delta 0). Chord-level ties are not yet coalesced.
+    /// - [`AbcElement::Rest`] → advances the running delta only.
+    /// - [`AbcElement::Barline`] → dropped.
+    /// - Repeat / volta markers are consumed by parse-time unrolling and should
+    ///   never reach this method.
     ///
     /// The 4095-tick per-event delta limit imposed by [`NoteEvent`] is clamped;
     /// callers who need longer rests should split them at parse time.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn to_score(&self, tick_div: u16) -> Score {
         let mut score = Score {
@@ -213,31 +270,118 @@ impl AbcTune {
         };
         let unit_ticks = self.unit_ticks(tick_div);
         let mut pending_delta: u32 = 0;
-        for elem in &self.body {
-            match *elem {
-                AbcElement::Note { midi, num, den } => {
-                    let ticks = duration_to_ticks(unit_ticks, num, den);
+        let mut i = 0;
+        while i < self.body.len() {
+            match self.body[i] {
+                AbcElement::Note {
+                    midi,
+                    num,
+                    den,
+                    tie_follows,
+                } => {
+                    // Coalesce a chain of tied notes of the same pitch.
+                    let mut total_ticks = duration_to_ticks(unit_ticks, num, den);
+                    let mut cur_tie = tie_follows;
+                    let mut next_i = i + 1;
+                    while cur_tie && next_i < self.body.len() {
+                        // Ignore transparent elements (barlines that may sit between
+                        // tied notes at bar boundaries).
+                        let mut probe = next_i;
+                        while probe < self.body.len()
+                            && matches!(self.body[probe], AbcElement::Barline)
+                        {
+                            probe += 1;
+                        }
+                        if probe >= self.body.len() {
+                            break;
+                        }
+                        if let AbcElement::Note {
+                            midi: m2,
+                            num: n2,
+                            den: d2,
+                            tie_follows: tf2,
+                        } = self.body[probe]
+                        {
+                            if m2 == midi {
+                                total_ticks = total_ticks
+                                    .saturating_add(duration_to_ticks(unit_ticks, n2, d2));
+                                cur_tie = tf2;
+                                next_i = probe + 1;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    let delta_on = u16::try_from(pending_delta.min(4095)).unwrap_or(4095);
+                    let delta_off = u16::try_from(total_ticks.min(4095)).unwrap_or(4095);
                     score.events.push(NoteEvent {
-                        delta_tick: u16::try_from(pending_delta.min(4095)).unwrap_or(4095),
+                        delta_tick: delta_on,
                         channel: 0,
                         note: midi,
                         velocity: 80,
                         kind: NoteEventKind::NoteOn,
                     });
                     score.events.push(NoteEvent {
-                        delta_tick: u16::try_from(ticks.min(4095)).unwrap_or(4095),
+                        delta_tick: delta_off,
                         channel: 0,
                         note: midi,
                         velocity: 0,
                         kind: NoteEventKind::NoteOff,
                     });
                     pending_delta = 0;
+                    i = next_i;
                 }
                 AbcElement::Rest { num, den } => {
                     let ticks = duration_to_ticks(unit_ticks, num, den);
                     pending_delta = pending_delta.saturating_add(ticks);
+                    i += 1;
                 }
-                AbcElement::Barline => {}
+                AbcElement::Chord {
+                    notes,
+                    count,
+                    num,
+                    den,
+                    tie_follows: _,
+                } => {
+                    let cnt = usize::from(count);
+                    let ticks = duration_to_ticks(unit_ticks, num, den);
+                    for (idx, note) in notes[..cnt].iter().copied().enumerate() {
+                        let delta = if idx == 0 {
+                            u16::try_from(pending_delta.min(4095)).unwrap_or(4095)
+                        } else {
+                            0
+                        };
+                        score.events.push(NoteEvent {
+                            delta_tick: delta,
+                            channel: 0,
+                            note,
+                            velocity: 80,
+                            kind: NoteEventKind::NoteOn,
+                        });
+                    }
+                    for (idx, note) in notes[..cnt].iter().copied().enumerate() {
+                        let delta = if idx == 0 {
+                            u16::try_from(ticks.min(4095)).unwrap_or(4095)
+                        } else {
+                            0
+                        };
+                        score.events.push(NoteEvent {
+                            delta_tick: delta,
+                            channel: 0,
+                            note,
+                            velocity: 0,
+                            kind: NoteEventKind::NoteOff,
+                        });
+                    }
+                    pending_delta = 0;
+                    i += 1;
+                }
+                AbcElement::Barline
+                | AbcElement::RepeatStart
+                | AbcElement::RepeatEnd
+                | AbcElement::VoltaStart(_) => {
+                    i += 1;
+                }
             }
         }
         score
@@ -304,11 +448,126 @@ pub fn parse(input: &str) -> Result<AbcTune, AbcError> {
         }
     }
 
-    if !body.iter().any(|e| matches!(e, AbcElement::Note { .. })) {
+    unroll_repeats(&mut body)?;
+
+    if !body
+        .iter()
+        .any(|e| matches!(e, AbcElement::Note { .. } | AbcElement::Chord { .. }))
+    {
         return Err(AbcError::EmptyTune);
     }
 
     Ok(AbcTune { header, body })
+}
+
+/// Expand `|:` `:|` blocks (with optional `[1` / `[2` voltas) into a linear body.
+///
+/// Simple case (no voltas): `|: A :|` → `A A`.
+/// Volta case: `|: A [1 B :| [2 C |` → `A B A C |` (barlines / trailing markers are
+/// preserved for downstream tooling).
+///
+/// The unroller processes one repeat block per iteration and re-scans after each
+/// expansion, which keeps the algorithm linear in the number of repeat markers
+/// even though it uses `splice`. Nested repeats are not supported and produce
+/// [`AbcError::NestedRepeat`].
+#[allow(clippy::too_many_lines)]
+fn unroll_repeats(body: &mut Vec<AbcElement>) -> Result<(), AbcError> {
+    let mut i = 0;
+    while i < body.len() {
+        if !matches!(body[i], AbcElement::RepeatStart) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+
+        // Locate matching RepeatEnd; error on nested RepeatStart.
+        let mut end_idx: Option<usize> = None;
+        for (offset, elem) in body.iter().enumerate().skip(start + 1) {
+            match elem {
+                AbcElement::RepeatStart => return Err(AbcError::NestedRepeat),
+                AbcElement::RepeatEnd => {
+                    end_idx = Some(offset);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let end = end_idx.ok_or(AbcError::UnbalancedRepeat)?;
+
+        // Locate optional first-ending marker inside the repeat block.
+        let volta1 = ((start + 1)..end).find(|&k| matches!(body[k], AbcElement::VoltaStart(1)));
+
+        // Locate optional second-ending marker immediately after the RepeatEnd.
+        // Skip a single barline between `:|` and `[2` if present.
+        let volta2_marker = {
+            let mut probe = end + 1;
+            while probe < body.len() && matches!(body[probe], AbcElement::Barline) {
+                probe += 1;
+            }
+            if probe < body.len() && matches!(body[probe], AbcElement::VoltaStart(2)) {
+                Some(probe)
+            } else {
+                None
+            }
+        };
+
+        // Determine slice boundaries.
+        let common_end = volta1.unwrap_or(end);
+        let common: Vec<AbcElement> = body[(start + 1)..common_end].to_vec();
+        let first_ending: Vec<AbcElement> = if let Some(v1) = volta1 {
+            body[(v1 + 1)..end].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // Second ending runs from after `[2` up to the next Barline / repeat marker
+        // / volta / end of body. That terminator itself is not consumed here so it
+        // stays in the body after splicing.
+        let (replace_end, second_ending): (usize, Vec<AbcElement>) = match volta2_marker {
+            Some(v2) => {
+                let content_start = v2 + 1;
+                let content_end = body
+                    .iter()
+                    .enumerate()
+                    .skip(content_start)
+                    .find(|(_, e)| {
+                        matches!(
+                            e,
+                            AbcElement::Barline
+                                | AbcElement::RepeatStart
+                                | AbcElement::RepeatEnd
+                                | AbcElement::VoltaStart(_)
+                        )
+                    })
+                    .map_or(body.len(), |(idx, _)| idx);
+                (content_end, body[content_start..content_end].to_vec())
+            }
+            None => (end + 1, Vec::new()),
+        };
+
+        let expanded_len = common.len() * 2 + first_ending.len() + second_ending.len();
+        let mut expanded: Vec<AbcElement> = Vec::with_capacity(expanded_len);
+        expanded.extend_from_slice(&common);
+        expanded.extend_from_slice(&first_ending);
+        expanded.extend_from_slice(&common);
+        expanded.extend_from_slice(&second_ending);
+
+        body.splice(start..replace_end, expanded);
+
+        // Restart scan at `start` — the expansion may itself contain no repeat markers,
+        // but this keeps the loop invariant simple.
+        i = start;
+    }
+
+    // After unroll, any leftover markers (e.g. stray `[1` without a repeat block) are
+    // dropped so `to_score()` never has to reason about them.
+    body.retain(|e| {
+        !matches!(
+            e,
+            AbcElement::RepeatStart | AbcElement::RepeatEnd | AbcElement::VoltaStart(_)
+        )
+    });
+    Ok(())
 }
 
 fn parse_header_field(
@@ -375,28 +634,32 @@ fn parse_tempo(s: &str) -> Option<u16> {
 }
 
 fn parse_key(s: &str) -> Option<KeySignature> {
+    // Arms are grouped by shared sharp count so relative major/minor pairs sit
+    // together (e.g. C major and A minor are both 0). This also keeps clippy's
+    // `match_same_arms` lint happy without an allow attribute.
     let core = s.split_whitespace().next()?;
     let sharps = match core {
-        "C" | "Cmaj" | "CMaj" => 0i8,
-        "G" | "Gmaj" => 1,
-        "D" | "Dmaj" => 2,
-        "A" | "Amaj" => 3,
-        "E" | "Emaj" => 4,
-        "B" | "Bmaj" => 5,
-        "F#" | "F#maj" => 6,
-        "C#" | "C#maj" => 7,
-        "F" | "Fmaj" => -1,
-        "Bb" | "Bbmaj" => -2,
-        "Eb" | "Ebmaj" => -3,
-        "Ab" | "Abmaj" => -4,
-        "Db" | "Dbmaj" => -5,
-        "Gb" | "Gbmaj" => -6,
-        "Cb" | "Cbmaj" => -7,
+        "C" | "Cmaj" | "CMaj" | "Am" | "Amin" => 0i8,
+        "G" | "Gmaj" | "Em" | "Emin" => 1,
+        "D" | "Dmaj" | "Bm" | "Bmin" => 2,
+        "A" | "Amaj" | "F#m" | "F#min" => 3,
+        "E" | "Emaj" | "C#m" | "C#min" => 4,
+        "B" | "Bmaj" | "G#m" | "G#min" => 5,
+        "F#" | "F#maj" | "D#m" | "D#min" => 6,
+        "C#" | "C#maj" | "A#m" | "A#min" => 7,
+        "F" | "Fmaj" | "Dm" | "Dmin" => -1,
+        "Bb" | "Bbmaj" | "Gm" | "Gmin" => -2,
+        "Eb" | "Ebmaj" | "Cm" | "Cmin" => -3,
+        "Ab" | "Abmaj" | "Fm" | "Fmin" => -4,
+        "Db" | "Dbmaj" | "Bbm" | "Bbmin" => -5,
+        "Gb" | "Gbmaj" | "Ebm" | "Ebmin" => -6,
+        "Cb" | "Cbmaj" | "Abm" | "Abmin" => -7,
         _ => return None,
     };
     Some(KeySignature { sharps })
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_body_line(
     line: &str,
     line_no: u16,
@@ -410,14 +673,38 @@ fn parse_body_line(
         match c {
             b'%' => break, // rest of line is a comment
             b'|' => {
-                body.push(AbcElement::Barline);
-                i += 1;
-                while i < bytes.len() && matches!(bytes[i], b'|' | b']' | b':') {
+                // `|:` = RepeatStart, else Barline (with `||`/`|]` swallowed)
+                if i + 1 < bytes.len() && bytes[i + 1] == b':' {
+                    body.push(AbcElement::RepeatStart);
+                    i += 2;
+                } else {
+                    body.push(AbcElement::Barline);
+                    i += 1;
+                    while i < bytes.len() && matches!(bytes[i], b'|' | b']') {
+                        i += 1;
+                    }
+                }
+            }
+            b':' => {
+                // `:|` = RepeatEnd, else no-op (stray `:` treated as structural)
+                if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+                    body.push(AbcElement::RepeatEnd);
+                    i += 2;
+                    while i < bytes.len() && matches!(bytes[i], b'|' | b']') {
+                        i += 1;
+                    }
+                } else {
                     i += 1;
                 }
             }
             b'[' => {
-                // Inline field `[X:...]` — skip to `]`. Else (chord `[abc]`) skip only `[`.
+                // Order: (1) volta `[N`, (2) inline field `[X:...]`, (3) chord `[<notes>]`
+                if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                    let (volta, consumed) = parse_volta(bytes, i, line_no)?;
+                    body.push(volta);
+                    i += consumed;
+                    continue;
+                }
                 let inline_field = i + 2 < bytes.len()
                     && bytes[i + 1].is_ascii_alphabetic()
                     && bytes[i + 2] == b':';
@@ -429,12 +716,18 @@ fn parse_body_line(
                     if i < bytes.len() {
                         i += 1; // consume `]`
                     }
-                } else {
-                    i += 1;
+                    continue;
                 }
+                // Chord
+                let (chord, consumed) = parse_chord(bytes, i, line_no, key)?;
+                body.push(chord);
+                i += consumed;
             }
-            b' ' | b'\t' | b'\r' | b']' | b'-' | b'(' | b')' | b'{' | b'}' | b':' | b'*' | b'.'
-            | b'~' | b'>' | b'<' => {
+            b' ' | b'\t' | b'\r' | b']' | b'-' | b'(' | b')' | b'{' | b'}' | b'*' | b'.' | b'~'
+            | b'>' | b'<' => {
+                // Structural / decoration characters — silently skipped.
+                // `-` here handles stray ties (a `-` right after a note is instead absorbed
+                // by the note branch below).
                 i += 1;
             }
             b'!' => {
@@ -460,8 +753,18 @@ fn parse_body_line(
             b'^' | b'_' | b'=' | b'A'..=b'G' | b'a'..=b'g' => {
                 let (midi, consumed) = parse_note(bytes, i, line_no, key)?;
                 let (num, den, dur_consumed) = parse_duration(bytes, i + consumed, line_no)?;
-                body.push(AbcElement::Note { midi, num, den });
-                i += consumed + dur_consumed;
+                let mut cursor = i + consumed + dur_consumed;
+                let tie_follows = cursor < bytes.len() && bytes[cursor] == b'-';
+                if tie_follows {
+                    cursor += 1;
+                }
+                body.push(AbcElement::Note {
+                    midi,
+                    num,
+                    den,
+                    tie_follows,
+                });
+                i = cursor;
             }
             b'z' | b'Z' | b'x' | b'X' => {
                 i += 1;
@@ -478,6 +781,90 @@ fn parse_body_line(
         }
     }
     Ok(())
+}
+
+/// Parse a volta marker `[N` starting at `[`. Returns the marker and bytes consumed.
+///
+/// Phase 2a accepts `[1` and `[2`; other numbers return `UnsupportedVolta`.
+fn parse_volta(bytes: &[u8], start: usize, line_no: u16) -> Result<(AbcElement, usize), AbcError> {
+    let mut pos = start + 1;
+    let digit_start = pos;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    if pos == digit_start {
+        return Err(AbcError::UnexpectedChar {
+            line: line_no,
+            ch: b'[',
+        });
+    }
+    let value = parse_u16(&bytes[digit_start..pos], line_no)?;
+    let volta_u8 = u8::try_from(value).map_err(|_| AbcError::UnsupportedVolta)?;
+    if volta_u8 == 0 || volta_u8 > 2 {
+        return Err(AbcError::UnsupportedVolta);
+    }
+    Ok((AbcElement::VoltaStart(volta_u8), pos - start))
+}
+
+/// Parse a chord `[<notes>]<duration>?-?` starting at `[`. Returns the chord element
+/// and total bytes consumed (including any duration modifier and tie suffix).
+fn parse_chord(
+    bytes: &[u8],
+    start: usize,
+    line_no: u16,
+    key: KeySignature,
+) -> Result<(AbcElement, usize), AbcError> {
+    let mut pos = start + 1;
+    let mut notes = [0u8; MAX_CHORD_NOTES];
+    let mut count: u8 = 0;
+
+    while pos < bytes.len() && bytes[pos] != b']' {
+        match bytes[pos] {
+            b' ' | b'\t' => {
+                pos += 1;
+            }
+            b'^' | b'_' | b'=' | b'A'..=b'G' | b'a'..=b'g' => {
+                let (midi, consumed) = parse_note(bytes, pos, line_no, key)?;
+                if usize::from(count) >= MAX_CHORD_NOTES {
+                    return Err(AbcError::ChordTooLarge);
+                }
+                notes[usize::from(count)] = midi;
+                count += 1;
+                pos += consumed;
+            }
+            ch => {
+                return Err(AbcError::UnexpectedChar { line: line_no, ch });
+            }
+        }
+    }
+
+    if pos >= bytes.len() {
+        return Err(AbcError::UnbalancedChord);
+    }
+    pos += 1; // consume `]`
+
+    if count == 0 {
+        return Err(AbcError::UnbalancedChord);
+    }
+
+    let (num, den, dur_consumed) = parse_duration(bytes, pos, line_no)?;
+    pos += dur_consumed;
+
+    let tie_follows = pos < bytes.len() && bytes[pos] == b'-';
+    if tie_follows {
+        pos += 1;
+    }
+
+    Ok((
+        AbcElement::Chord {
+            notes,
+            count,
+            num,
+            den,
+            tie_follows,
+        },
+        pos - start,
+    ))
 }
 
 /// Parse a note starting at position `start`. Returns `(midi, bytes_consumed)`.
@@ -658,7 +1045,7 @@ mod tests {
             .filter(|e| matches!(e, AbcElement::Note { .. }))
             .collect();
         assert_eq!(notes.len(), 7);
-        if let AbcElement::Note { midi, num, den } = notes[6] {
+        if let AbcElement::Note { midi, num, den, .. } = notes[6] {
             assert_eq!(*midi, 67);
             assert_eq!(*num, 2);
             assert_eq!(*den, 1);
@@ -938,6 +1325,267 @@ mod tests {
         let score = tune.to_score(96);
         assert_eq!(score.header.tempo_bpm, 100);
         assert!(score.events.len() >= 28); // 14+ notes × 2 events
+    }
+
+    // ---------- Phase 2a tests: chord / repeat / volta / tie / minor keys ----------
+
+    #[test]
+    fn phase2a_chord_basic_triad() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG] |\n";
+        let tune = parse(src).expect("parse");
+        let chord = tune
+            .body
+            .iter()
+            .find(|e| matches!(e, AbcElement::Chord { .. }))
+            .expect("chord");
+        if let AbcElement::Chord {
+            notes: [n0, n1, n2, ..],
+            count,
+            num,
+            den,
+            ..
+        } = *chord
+        {
+            assert_eq!(count, 3);
+            assert_eq!([n0, n1, n2], [60u8, 64, 67]); // C E G
+            assert_eq!(num, 1);
+            assert_eq!(den, 1);
+        }
+    }
+
+    #[test]
+    fn phase2a_chord_with_duration_modifier() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG]2 |\n";
+        let tune = parse(src).expect("parse");
+        if let Some(AbcElement::Chord { num, den, .. }) = tune
+            .body
+            .iter()
+            .copied()
+            .find(|e| matches!(e, AbcElement::Chord { .. }))
+        {
+            assert_eq!(num, 2);
+            assert_eq!(den, 1);
+        }
+    }
+
+    #[test]
+    fn phase2a_chord_with_individual_accidentals() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[^Ce_g] |\n";
+        let tune = parse(src).expect("parse");
+        if let Some(AbcElement::Chord {
+            notes: [n0, n1, n2, ..],
+            count,
+            ..
+        }) = tune
+            .body
+            .iter()
+            .copied()
+            .find(|e| matches!(e, AbcElement::Chord { .. }))
+        {
+            assert_eq!(count, 3);
+            assert_eq!(n0, 61); // ^C = C#4 = 61
+            assert_eq!(n1, 76); // e = E5 = 76
+            assert_eq!(n2, 78); // _g = Gb5 = 78
+        }
+    }
+
+    #[test]
+    fn phase2a_chord_too_large_errors() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CDEFGABcd] |\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::ChordTooLarge);
+    }
+
+    #[test]
+    fn phase2a_chord_unbalanced_errors() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG C\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::UnbalancedChord);
+    }
+
+    #[test]
+    fn phase2a_chord_score_conversion_emits_stacked_events() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG] |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        // 3 NoteOn (delta 0, 0, 0) + 3 NoteOff (delta 96, 0, 0)
+        assert_eq!(score.events.len(), 6);
+        assert_eq!(score.events[0].kind, NoteEventKind::NoteOn);
+        assert_eq!(score.events[0].note, 60);
+        assert_eq!(score.events[0].delta_tick, 0);
+        assert_eq!(score.events[1].note, 64);
+        assert_eq!(score.events[1].delta_tick, 0);
+        assert_eq!(score.events[2].note, 67);
+        assert_eq!(score.events[2].delta_tick, 0);
+        assert_eq!(score.events[3].kind, NoteEventKind::NoteOff);
+        assert_eq!(score.events[3].note, 60);
+        assert_eq!(score.events[3].delta_tick, 96);
+        assert_eq!(score.events[4].delta_tick, 0);
+        assert_eq!(score.events[5].delta_tick, 0);
+    }
+
+    #[test]
+    fn phase2a_repeat_simple_unroll() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: C D :|\n";
+        let tune = parse(src).expect("parse");
+        // After unroll: C D C D (barlines dropped, markers removed)
+        let midis: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(midis.as_slice(), &[60u8, 62, 60, 62][..]);
+        assert!(!tune
+            .body
+            .iter()
+            .any(|e| matches!(e, AbcElement::RepeatStart | AbcElement::RepeatEnd)));
+    }
+
+    #[test]
+    fn phase2a_repeat_with_voltas() {
+        // |: A [1 B :| [2 C |  →  A B A C |
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [2 c |\n";
+        let tune = parse(src).expect("parse");
+        let midis: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        // A = 69, B = 71, c = 72
+        assert_eq!(midis.as_slice(), &[69u8, 71, 69, 72][..]);
+        assert!(!tune
+            .body
+            .iter()
+            .any(|e| matches!(e, AbcElement::VoltaStart(_))));
+    }
+
+    #[test]
+    fn phase2a_repeat_nested_errors() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: C |: D :| :|\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::NestedRepeat);
+    }
+
+    #[test]
+    fn phase2a_repeat_unbalanced_errors() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: C D |\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::UnbalancedRepeat);
+    }
+
+    #[test]
+    fn phase2a_volta_number_3_unsupported() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [3 C |\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::UnsupportedVolta);
+    }
+
+    #[test]
+    fn phase2a_tie_merges_same_pitch_duration() {
+        // Two quarter-notes tied → one half-note (2× ticks).
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nC-C |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        assert_eq!(score.events.len(), 2); // 1 NoteOn + 1 NoteOff (merged)
+        assert_eq!(score.events[0].kind, NoteEventKind::NoteOn);
+        assert_eq!(score.events[0].note, 60);
+        assert_eq!(score.events[1].kind, NoteEventKind::NoteOff);
+        assert_eq!(score.events[1].note, 60);
+        assert_eq!(score.events[1].delta_tick, 192); // 96 + 96
+    }
+
+    #[test]
+    fn phase2a_tie_across_barline() {
+        // Quarter-note tied across a barline to another quarter-note.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nC- | C |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        assert_eq!(score.events.len(), 2);
+        assert_eq!(score.events[1].delta_tick, 192);
+    }
+
+    #[test]
+    fn phase2a_tie_mismatched_pitch_does_not_merge() {
+        // A `-` between different pitches: from-side note still records the tie flag
+        // but coalescing must not proceed since MIDI numbers differ.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nC-D |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        assert_eq!(score.events.len(), 4); // 2 NoteOn + 2 NoteOff (no merge)
+        assert_eq!(score.events[0].note, 60);
+        assert_eq!(score.events[2].note, 62);
+    }
+
+    #[test]
+    fn phase2a_tie_chain_of_three_notes() {
+        // C-C-C — three quarter notes fused into one 3× duration.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nC-C-C |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        assert_eq!(score.events.len(), 2);
+        assert_eq!(score.events[1].delta_tick, 288); // 3 × 96
+    }
+
+    #[test]
+    fn phase2a_minor_key_am_zero_sharps() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:Am\nC |\n";
+        let tune = parse(src).expect("parse");
+        assert_eq!(tune.header.key.sharps, 0);
+    }
+
+    #[test]
+    fn phase2a_minor_key_bm_two_sharps_via_amin_synonym() {
+        let src1 = "X:1\nM:4/4\nL:1/4\nK:Bm\nC |\n";
+        let src2 = "X:1\nM:4/4\nL:1/4\nK:Bmin\nC |\n";
+        let t1 = parse(src1).expect("Bm");
+        let t2 = parse(src2).expect("Bmin");
+        assert_eq!(t1.header.key.sharps, 2);
+        assert_eq!(t2.header.key.sharps, 2);
+    }
+
+    #[test]
+    fn phase2a_minor_key_dm_flattens_b() {
+        // D minor has 1 flat (Bb). Playing bare `B` in K:Dm must yield Bb (MIDI 70).
+        let src = "X:1\nM:4/4\nL:1/4\nK:Dm\nB |\n";
+        let tune = parse(src).expect("parse");
+        if let Some(AbcElement::Note { midi, .. }) = tune
+            .body
+            .iter()
+            .copied()
+            .find(|e| matches!(e, AbcElement::Note { .. }))
+        {
+            assert_eq!(midi, 70); // Bb4
+        } else {
+            panic!("expected a Note");
+        }
+    }
+
+    #[test]
+    fn phase2a_all_15_minor_keys_parse() {
+        let fixtures: &[&str] = &[
+            "X:1\nM:4/4\nL:1/4\nK:Am\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Em\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Bm\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:F#m\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:C#m\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:G#m\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:D#m\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:A#m\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Dm\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Gm\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Cm\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Fm\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Bbm\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Ebm\nC |\n",
+            "X:1\nM:4/4\nL:1/4\nK:Abm\nC |\n",
+        ];
+        for src in fixtures {
+            assert!(
+                parse(src).is_ok(),
+                "minor key fixture should parse: {src:?}"
+            );
+        }
     }
 
     #[test]

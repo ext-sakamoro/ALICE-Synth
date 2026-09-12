@@ -28,7 +28,7 @@
 - Unity C# `bindings/unity/AliceSynth.cs`
 - UE5 C++ `bindings/ue5/AliceSynth.h`
 
-### 🚧 Phase 1b — ABC notation parser (v0.2.0, 2026-09-12)
+### ✅ Phase 1b — ABC notation parser (v0.2.0-dev, 2026-09-12)
 
 **Motivation**: YuE2 (M-A-P × HKUST, 2026-09-10) established ABC notation as the canonical
 human-editable intermediate representation for symbolic music planning. ALICE-Synth's founding
@@ -63,15 +63,36 @@ minor keys, mode names.
 - 仮実装 grep (`todo!|unimplemented!|panic!.*stub|TODO|mock|dummy|placeholder`) = 0 hits in `src/abc.rs`
 - End-to-end verified: ABC → Score → PCM via `Synthesizer` (existing pipeline)
 
-### ⏳ Phase 2 — ABC extended coverage
+### ✅ Phase 2a — Chord / repeat / tie / minor keys (v0.2.0-dev, 2026-09-12)
+
+Landed in the same v0.2.0-dev milestone as Phase 1b (single commit follow-up).
+
+- **Chord expansion `[CEG]`** — `AbcElement::Chord { notes: [u8; MAX_CHORD_NOTES=8], count, num, den, tie_follows }`;
+  supports per-note accidentals (`[^Ce_g]`) and duration modifier (`[CEG]2`); score conversion
+  emits N `NoteOn` (first with pending delta, rest with 0) + N `NoteOff` (first with chord
+  duration, rest with 0).
+- **Repeats `|: :|`** — parse-time `unroll_repeats()` post-processes markers into linear body;
+  `|: X :|` → `X X`. Nested repeats return `AbcError::NestedRepeat`; unbalanced return
+  `AbcError::UnbalancedRepeat`.
+- **Voltas `[1` `[2`** — `|: A [1 B :| [2 C |` → `A B A C`. Numbers ≥ 3 return
+  `AbcError::UnsupportedVolta`.
+- **Ties `-`** — `Note.tie_follows: bool` (**breaking pattern-match change**, see ADR-005);
+  consecutive same-pitch tied notes coalesce into one sustained `NoteOn`/`NoteOff` pair at
+  score-conversion time (ticks summed, so cross-barline ties work).
+- **30 canonical key signatures** — added 15 relative minors (Am/Em/…/Abm) accepting both `m`
+  and `min` suffixes; sharp counts computed as `relative_major − 3` per canonical theory.
+- 19 new tests (`phase2a_*`); total 45 abc tests / 145 crate tests. Clippy pedantic clean, fmt
+  clean, doctest passes, no_std + alloc build passes.
+
+### ⏳ Phase 2b — Extended ABC coverage
 
 - Multi-voice `V:` support (multi-track output → Score channels)
-- Chord expansion `[CEG]` → simultaneous NoteOn/NoteOff at delta=0
-- Ties `-` → merge adjacent notes of the same pitch into one longer note
 - Grace notes `{gab}` → very short prefix notes
 - Tuplets `(3abc` → 3-in-the-time-of-2 duration adjustment
-- Minor keys + mode names (dor / mix / lyd / phr / loc / aeo)
-- Repeat structures `|:` `:|` `[1` `[2` — score-level unroll to native format
+- Church modes (dor / mix / lyd / phr / loc / aeo) — currently only Ionian (major) and Aeolian (minor)
+- Chord-level tie coalescing (Phase 2a parses chord `tie_follows` but does not merge)
+- Volta numbers ≥ 3 (`[3` `[4`)
+- Repeat with symmetric first-ending short-hand (`|:|`, `::`)
 
 ### ⏳ Phase 3 — Symbolic Intent DSL integration
 
@@ -144,6 +165,35 @@ compatible and does not pull in `std`.
 **Consequences**: (+) Preserves ALICE-Synth's embedded-friendly posture; no bloat when the
 feature is disabled. (−) Error messages carry no dynamic context (only `line: u16` + `ch: u8`);
 callers who want richer diagnostics must lift `AbcError` into their own std-flavored types.
+
+### ADR-005 — `Note.tie_follows: bool` field is a breaking pattern-match change (2026-09-12)
+
+**Context**: Phase 2a needs to represent tied notes. Two options:
+
+1. Add a required field `tie_follows: bool` to `AbcElement::Note`.
+2. Introduce a wrapper variant `AbcElement::TiedNote(Note)` that composes.
+
+**Decision**: Option 1 (required field).
+
+**Consequences**: (+) Direct — score conversion just reads the flag. (+) Keeps `AbcElement`
+enum flat, no double-indirection when scanning. (−) **Breaking pre-1.0**: existing code that
+destructured `AbcElement::Note { midi, num, den }` without `..` will fail to compile. Callers
+must add either the new field or `..`. Since the crate is pre-1.0 and no external consumers
+exist yet, we accept the churn. The alternative wrapper variant would also break patterns
+(a wrapper `TiedNote(Note)` requires matching on both variants), so the churn is unavoidable.
+
+### ADR-006 — Repeat unrolling at parse time, not at `to_score()` (2026-09-12)
+
+**Context**: Repeats can be expanded either at parse time (fold `|: :|` into a linear body) or
+at score conversion (stateful stack walking during iteration).
+
+**Decision**: Unroll at parse time via `unroll_repeats()`.
+
+**Consequences**: (+) `to_score()` stays linear and stateless w.r.t. repeats. (+) `AbcTune.body`
+is a single source of truth of the played sequence; downstream tooling (visualization, export)
+sees the same order the synth does. (−) Repeat structure is lost; round-tripping the body back
+to ABC text would produce an unrolled version. Acceptable for MVP — round-trip export is not a
+Phase 2 goal.
 
 ### ADR-004 — Barlines emit no Score events in Phase 1 (2026-09-12)
 
