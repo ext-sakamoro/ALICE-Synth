@@ -2,6 +2,18 @@
 
 All notable changes to ALICE-Synth will be documented in this file.
 
+## [0.2.0-dev] - 2026-09-12
+
+### Added
+- `abc` module — ABC notation parser for YuE2-style symbolic planning (`feature = "abc"`)
+  - Parses header fields `M:` `L:` `Q:` `K:` and body notes / accidentals / durations / rests / barlines
+  - 15 canonical major key signatures (C, G, D, A, E, B, F#, C#, F, Bb, Eb, Ab, Db, Gb, Cb)
+  - Rational duration storage (`num`/`den` × unit length) — one parse renders at any tick division
+  - `AbcTune::to_score()` converts to native `Score` for playback via existing `Synthesizer`
+  - `no_std + alloc` compatible, zero extra dependencies
+  - 26 unit tests including Ode-to-Joy fixture + end-to-end PCM synthesis via `Synthesizer`
+- Module doc reference to YuE2 (Multimodal Art Projection × HKUST, 2026-09-10) as the canonical prior art
+
 ## [0.1.1] - 2026-03-04
 
 ### Added

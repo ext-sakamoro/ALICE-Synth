@@ -15,12 +15,14 @@
 //! | [`score`] | Compact score format — 8-byte header + 4-byte note events, serializable |
 //! | [`synth`] | Multi-voice polyphonic engine — 64-voice, 16-channel, score playback to PCM |
 //! | [`effects`] | Audio effects — delay, low-pass, state-variable filter, reverb |
+//! | `abc` | ABC notation parser — YuE2-style symbolic planning (feature `abc`) |
 //!
 //! ## Cargo Features
 //!
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `std` | no | Standard library support |
+//! | `abc` | no | ABC notation parser (Symbolic Planning) — `no_std + alloc` compatible |
 //! | `ffi` | no | C/C++/C# FFI — 20 `extern "C"` functions |
 //! | `python` | no | `PyO3` Python bindings — 4 classes + 2 functions |
 //! | `midi` | no | MIDI file import/export (future) |
@@ -74,6 +76,8 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+#[cfg(feature = "abc")]
+pub mod abc;
 pub mod effects;
 pub mod envelope;
 #[cfg(feature = "ffi")]

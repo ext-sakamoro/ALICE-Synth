@@ -1,6 +1,6 @@
 [package]
 name = "alice-synth"
-version = "0.1.1"
+version = "0.2.0-dev"
 edition = "2021"
 authors = ["Moroya Sakamoto <sakamoro@alicelaw.net>"]
 description = "Procedural Audio Synthesizer — Don't send waveforms, send the score"
@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [features]
 default = []
 std = []
+abc = []                          # ABC notation parser (Symbolic Planning) — no_std + alloc
 ffi = ["std"]                    # C/C++/C# FFI bindings
 python = ["pyo3", "std"]          # Python bindings via PyO3
 midi = ["std"]                    # MIDI file import/export
