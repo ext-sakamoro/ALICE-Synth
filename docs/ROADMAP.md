@@ -115,12 +115,28 @@ Landed in the same v0.2.0-dev milestone as Phase 1b (single commit follow-up).
   `Barline + RepeatStart`.
 - 12 new tests (`phase2c_*`); total 76 abc tests / 176 crate tests. Clippy pedantic clean.
 
-### ⏳ Phase 3 — Symbolic Intent DSL integration
+### 🟡 Phase 3 — Symbolic Intent packet + procedural synthesizer (v0.2.0-dev, 2026-09-13)
 
-- `AbcTune` ↔ ALICE-LOL Music IR round-trip (via `alice-compiler` AST)
-- 8-byte Intent packet compression (ALICE 三相原理 Phase 3): "genre + mood + length" → server-side
-  ABC synthesis (LLM plan head, delegated to ALICE-LLM)
-- Zero-shot cover pipeline: audio → SheetSage2-style transcription → AbcTune → style rewrite
+**Landed in ALICE-Synth** (this crate):
+
+- **`intent` feature** — new `src/intent.rs` module (~700 LoC + 22 tests).
+- **8-byte `MusicIntent` packet** — genre / mood / length_bars / tempo_bpm_offset / key /
+  mode / variation_seed. Byte-exact `to_bytes` / `from_bytes` roundtrip.
+- **`MusicIntent::synthesize()`** — deterministic procedural generator (mode scale ×
+  mood-weighted degree bias × LCG PRNG) that acts as the canonical stand-in for a future
+  LLM-driven plan head.
+- **`MusicIntent::from_tune()`** — best-effort inverse extraction (Ionian assumed, FNV-1a
+  seed hash).
+- Canonical constants in `intent::genre`, `intent::mood`, `intent::mode` submodules.
+- ADR-010: ambiguous sharp-count → tonic reverse lookup prefers Ionian.
+- ADR-011: procedural synthesizer is the MVP; LLM plan head is a drop-in replacement.
+
+**Still open (cross-crate work, tracked as Phase 3.1)**:
+
+- `AbcTune` ↔ ALICE-LOL Music IR round-trip (needs LOL repo changes)
+- Actual LLM-driven `synthesize` alternative (needs ALICE-LLM audio-token head)
+- Zero-shot cover pipeline: audio → SheetSage2-style transcription → `AbcTune` → style
+  rewrite (needs a transcription model — external crate)
 - Agentic editing: `AbcTune` diff / patch API for LLM-driven revision loops
 
 ### ⏳ Phase 4 — Audio quality parity with modern models
@@ -269,6 +285,39 @@ to-chord's onset. (+) Rest handling (rests break ties) is explicit: flush `tied_
 scan-forward loop was easier to reason about for the Note-only case; the new state machine
 requires understanding a small piece of stateful arithmetic. All Phase 2a Note-tie tests
 still pass unchanged.
+
+### ADR-010 — Ambiguous key signature reverse-lookup prefers Ionian (2026-09-13)
+
+**Context**: `MusicIntent::from_tune` needs to recover a `(tonic, mode)` pair from an
+`AbcHeader`'s sharp count. A given sharp count is ambiguous — 0 sharps could be C major,
+A minor, D Dorian, E Phrygian, F Lydian, G Mixolydian, or B Locrian. All are valid.
+
+**Decision**: Prefer Ionian (major). If Ionian is out of the canonical `-7..=7` range, fall
+back to Aeolian (natural minor). Other modes are never inferred.
+
+**Consequences**: (+) Deterministic and unsurprising for the most common case. (+) Zero
+external metadata required. (−) A tune actually written in D Dorian will be reported as
+F major on the reverse trip. This is documented behaviour, not a bug — callers who need
+mode fidelity should pass the intent packet around instead of the ABC text.
+
+### ADR-011 — Procedural synthesizer is the canonical MVP; LLM plan head is a future drop-in (2026-09-13)
+
+**Context**: ALICE 三相原理 Phase 3 is defined by an intent packet + a synthesizer that
+turns intent into a tune. The synthesizer is the "smart" part. Two options:
+
+1. Ship a stub that panics until an LLM plan head exists in ALICE-LLM.
+2. Ship a deterministic procedural generator (`mode_scale × mood_bias × LCG PRNG`) that
+   produces valid, listenable tunes today; treat it as the canonical MVP; allow a future
+   LLM-driven implementation to slot in without changing the `MusicIntent` wire format.
+
+**Decision**: Option 2 (procedural MVP).
+
+**Consequences**: (+) The intent packet is usable end-to-end from day one — 8 bytes in, PCM
+audio out via `synthesize().to_score(96)` → existing `Synthesizer`. (+) Downstream projects
+(ALICE-LOL Music IR, ALICE-LLM audio head, ALICE-Cognitive agentic editing) can integrate
+against a stable API. (+) Same packet always produces the same tune, on any host. (−) Musical
+quality is limited by the procedural rules; a rich LLM plan head will produce more
+compelling output. That is Phase 3.1 work, on ALICE-LLM's side.
 
 ### ADR-004 — Barlines emit no Score events in Phase 1 (2026-09-12)
 

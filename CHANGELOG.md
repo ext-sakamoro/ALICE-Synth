@@ -83,6 +83,37 @@ All notable changes to ALICE-Synth will be documented in this file.
   machine. All Phase 2a Note-tie tests still pass unchanged; the new mechanism now also handles
   chord-level ties. Documented in `docs/ROADMAP.md` ADR-009.
 
+### Added — Phase 3 (ALICE 三相原理 Intent packet + procedural synthesizer)
+- **`intent` feature** (`feature = "intent"`, implies `abc`) — new module `src/intent.rs`
+  (~700 LoC + 22 tests).
+- **`MusicIntent` — 8-byte packet** representing a musical intent: genre (u8) + mood (u8) +
+  length_bars (u8) + tempo_bpm_offset (u8) + key (u8, tonic index 0..=14) + mode (u8) +
+  variation_seed (u16 little-endian). `to_bytes` / `from_bytes` roundtrip is exact.
+- **Canonical constants** in submodules `genre::` (Folk / Jazz / Blues / Classical / Pop /
+  Ambient / Rock / Lullaby / Cinematic / Electronic), `mood::` (Happy / Sad / Tense / Serene /
+  Energetic / Melancholy / Mysterious / Triumphant), `mode::` (Ionian / Dorian / Phrygian /
+  Lydian / Mixolydian / Aeolian / Locrian, plus `MAJOR` / `MINOR` aliases).
+- **`MusicIntent::synthesize()` → `AbcTune`** deterministic procedural generator: mode scale
+  × mood-weighted degree bias × LCG PRNG seeded by `variation_seed`. Serves as the canonical
+  stand-in for a future LLM-driven plan head (ADR-011); same packet → same tune, always.
+- **`MusicIntent::from_tune()`** — best-effort inverse: extracts key (Ionian assumed, falls
+  back to Aeolian), tempo, and length_bars; derives a stable `variation_seed` via FNV-1a hash
+  of the body's note pitches. Genre / mood default to Folk / Happy (categorical labels do not
+  survive the ABC round trip).
+- **`MusicIntent::DEFAULT_C_MAJOR`** — a neutral starting point (C-major Folk / Happy at 120
+  BPM, 4 bars, seed `0xC0DE`).
+- ALICE 三相原理 realized: instead of shipping ABC score text (Phase 2, Law), a caller ships
+  8 bytes and the receiver reconstructs the tune locally.
+- 22 unit tests + 1 doctest; **total 198 crate tests**. Clippy pedantic clean, fmt clean,
+  no_std + alloc build passes.
+
+### Documented — Phase 3
+- ADR-010 (docs/ROADMAP.md): Ambiguous key signature reverse-lookup in `from_tune` prefers
+  Ionian over relative Aeolian for aesthetic simplicity.
+- ADR-011 (docs/ROADMAP.md): Procedural synthesizer is the canonical MVP; a future
+  LLM-driven plan head can slot in as an alternate `synthesize` implementation without
+  changing the `MusicIntent` wire format.
+
 ## [0.1.1] - 2026-03-04
 
 ### Added

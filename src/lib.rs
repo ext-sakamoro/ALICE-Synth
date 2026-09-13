@@ -16,6 +16,7 @@
 //! | [`synth`] | Multi-voice polyphonic engine — 64-voice, 16-channel, score playback to PCM |
 //! | [`effects`] | Audio effects — delay, low-pass, state-variable filter, reverb |
 //! | `abc` | ABC notation parser — YuE2-style symbolic planning (feature `abc`) |
+//! | `intent` | 8-byte Musical Intent packet + deterministic synthesizer (feature `intent`) |
 //!
 //! ## Cargo Features
 //!
@@ -23,6 +24,7 @@
 //! |---------|---------|-------------|
 //! | `std` | no | Standard library support |
 //! | `abc` | no | ABC notation parser (Symbolic Planning) — `no_std + alloc` compatible |
+//! | `intent` | no | 8-byte Musical Intent packet + deterministic synthesizer (implies `abc`) |
 //! | `ffi` | no | C/C++/C# FFI — 20 `extern "C"` functions |
 //! | `python` | no | `PyO3` Python bindings — 4 classes + 2 functions |
 //! | `midi` | no | MIDI file import/export (future) |
@@ -82,6 +84,8 @@ pub mod effects;
 pub mod envelope;
 #[cfg(feature = "ffi")]
 pub mod ffi;
+#[cfg(feature = "intent")]
+pub mod intent;
 #[cfg(feature = "midi")]
 pub mod midi;
 pub mod oscillator;

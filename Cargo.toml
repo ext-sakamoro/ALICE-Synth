@@ -18,6 +18,7 @@ path = "src/lib.rs"
 default = []
 std = []
 abc = []                          # ABC notation parser (Symbolic Planning) — no_std + alloc
+intent = ["abc"]                  # 8-byte Musical Intent packet + deterministic synthesizer (ALICE 三相原理 Phase 3)
 ffi = ["std"]                    # C/C++/C# FFI bindings
 python = ["pyo3", "std"]          # Python bindings via PyO3
 midi = ["std"]                    # MIDI file import/export
