@@ -148,11 +148,19 @@ Landed together with the ALICE-LOL side (LOL commit `c41de9b`):
 - ADR-013: `AbcDiff` is intentionally position-based (LCS is Phase 4 candidate).
 - ADR-014: `Transcriber` trait lives here without concrete impls.
 
-Still open (**Phase 3.2**):
+### 🟢 Phase 3.2 (partial) — LCS-based `AbcDiff` (v0.2.0-dev, 2026-09-13)
+
+- **`AbcDiff::compute_lcs`** + **`AbcTune::diff_lcs`** — classic `O(N × M)` LCS DP
+  backend, detects element shifts as coherent single-edit operations. Preserves the
+  positional `compute` / `diff` methods for callers who prefer the coarser but faster
+  path.
+- 12 new tests; total 232 crate tests. Clippy pedantic clean.
+- ADR-015: LCS backend co-exists with positional; callers pick per revision profile.
+
+Still open (**Phase 3.2 continued**):
 
 - Actual LLM-driven `PlanHead` implementation (ALICE-LLM audio-token head)
 - Concrete `Transcriber` implementations (external ML crate wrapping `SheetSage2`)
-- LCS/Myers-style upgrade for `AbcDiff` (Phase 4 audio-quality parity work)
 
 ### ⏳ Phase 4 — Audio quality parity with modern models
 
@@ -387,6 +395,26 @@ transcription stage is a hard ML problem. Two options:
 (−) A user opting into the `cover` feature cannot immediately run a cover; they need a
 concrete transcriber. The doctest and unit tests use a `FixedTranscriber` stub to
 demonstrate the composition pattern.
+
+### ADR-015 — LCS backend co-exists with the positional backend (2026-09-13)
+
+**Context**: Phase 3.1 shipped `AbcDiff::compute` as a position-based diff and deferred
+LCS/Myers to Phase 4 (ADR-013). Phase 3.2 brought LCS forward as a bounded engineering
+task. The question was whether to replace the positional backend or keep both.
+
+**Decision**: Keep both. `AbcDiff::compute` remains position-based; `AbcDiff::compute_lcs`
+adds an LCS backend. `AbcTune::diff` calls the positional backend; `AbcTune::diff_lcs`
+calls the LCS backend. Both produce interchangeable `AbcDiff` values (the LCS backend
+just leaves `body_replacements` empty).
+
+**Consequences**: (+) Callers pick per revision profile: small localized edits → `diff`
+(`O(N)`, no allocation for a DP table); structural edits → `diff_lcs` (`O(N × M)`, but
+shift-aware). (+) Backward compatible — no existing caller of `compute` / `diff` sees
+behaviour change. (−) Two backends to maintain. Acceptable because the LCS backend is
+~80 lines and the positional backend is ~40 lines; both live in one module.
+
+This ADR supersedes the "LCS is Phase 4 candidate" note in ADR-013 — LCS shipped in
+Phase 3.2 instead.
 
 ### ADR-004 — Barlines emit no Score events in Phase 1 (2026-09-12)
 

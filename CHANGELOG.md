@@ -148,6 +148,23 @@ All notable changes to ALICE-Synth will be documented in this file.
   implementations here. Keeps this crate free of ML dependencies while giving downstream
   transcribers a stable interface to target.
 
+### Added — Phase 3.2 (LCS-based diff — shift-aware editing)
+- **`AbcDiff::compute_lcs`** — new LCS (Longest Common Subsequence) backend for the
+  agentic diff. Classic `O(N × M)` DP table with backtracking, emitting insert/remove
+  edits only (no `body_replacements`). Detects element shifts as coherent single-edit
+  operations rather than as chains of positional replacements.
+- **`AbcTune::diff_lcs`** — convenience method paired with the existing `AbcTune::diff`.
+- 12 new unit tests demonstrating shift detection (prepend, splice, deletion), edge
+  cases (empty original / revised), and confirming header-change behaviour matches the
+  positional backend. **Total 232 crate tests.**
+- Position-based backend (`AbcDiff::compute`, `AbcTune::diff`) unchanged — callers keep
+  choosing the trade-off (fast + coarse vs. thorough + shift-aware).
+
+### Documented — Phase 3.2
+- ADR-015 (docs/ROADMAP.md): `compute_lcs` co-exists with `compute` rather than replacing
+  it. Callers pick per revision profile — small edits → positional (`O(N)`), structural
+  edits → LCS (`O(N × M)`). Removes the "LCS is Phase 4 candidate" note from ADR-013.
+
 ## [0.1.1] - 2026-03-04
 
 ### Added
