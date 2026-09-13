@@ -56,6 +56,33 @@ All notable changes to ALICE-Synth will be documented in this file.
   `extra_voices: Vec::new()`). Existing pattern matches using `AbcTune { header, body, .. }` remain
   unaffected. Documented in `docs/ROADMAP.md` ADR-007.
 
+### Added — Phase 2c (chord tie / volta ≥ 3 / repeat shorthand)
+- **Chord tie coalescing** — `render_voice_to_absolute` refactored to a `tied_in` state machine
+  that unifies Note-tie and Chord-tie handling. Per-note ties across chords with mismatching
+  pitch sets are supported: `[CEG]-[CEF]` ties C and E across chord boundaries while G ends
+  normally and F starts fresh at the second onset. `[CEG]-C` (chord tying into a single note)
+  and `[CEG]-z[CEG]` (rest breaking the chord tie) are also handled. Dangling ties at
+  end-of-body emit a final `NoteOff` to keep the event stream well-formed.
+- **Voltas `[1`..`[4`** — `unroll_repeats` refactored to a two-phase state machine
+  (`extract_repeat_block` + iteration expansion). Any number of voltas from 1 to 4 supported;
+  iteration count is `max(2, num_voltas_defined)`. Missing volta indices (e.g. `[1]` + `[3]`
+  without `[2]`) leave the corresponding iteration to play the common section only.
+  Volta numbers ≥ 5 continue to return `AbcError::UnsupportedVolta`.
+- **Repeat shorthands** — `::` parsed as `RepeatEnd + RepeatStart` (end-then-start).
+  `|:|` parsed as `Barline + RepeatStart` (barline immediately followed by a new repeat).
+- 12 new unit tests (`phase2c_*`); **total 76 abc tests, 176 crate tests**. Clippy pedantic clean.
+
+### Changed — Phase 2c (breaking, pre-1.0)
+- **Volta acceptance range** raised from `[1..=2]` to `[1..=4]`. The Phase 2a test
+  `phase2a_volta_number_3_unsupported` was renamed to `phase2a_volta_number_5_unsupported` to
+  reflect the new boundary. Callers depending on the old rejection at `[3]` must update.
+- Test `phase2c_volta_five_still_unsupported` documents the new upper bound.
+
+### Refactored — Phase 2c (behaviourally identical)
+- `render_voice_to_absolute` moved from an ad-hoc tie-chain loop to a unified `tied_in` state
+  machine. All Phase 2a Note-tie tests still pass unchanged; the new mechanism now also handles
+  chord-level ties. Documented in `docs/ROADMAP.md` ADR-009.
+
 ## [0.1.1] - 2026-03-04
 
 ### Added

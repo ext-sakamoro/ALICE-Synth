@@ -102,11 +102,18 @@ Landed in the same v0.2.0-dev milestone as Phase 1b (single commit follow-up).
 - 19 new tests (`phase2b_*`); total 65 abc tests / 164 crate tests. Clippy pedantic clean, fmt
   clean, doctest passes, no_std + alloc build passes, stub grep clean.
 
-### ⏳ Phase 2c — Deferred ABC features
+### ✅ Phase 2c — Chord tie / volta ≥ 3 / repeat shorthand (v0.2.0-dev, 2026-09-13)
 
-- Chord-level tie coalescing (Phase 2a parses chord `tie_follows` but does not merge)
-- Volta numbers ≥ 3 (`[3` `[4`)
-- Repeat with symmetric first-ending shorthand (`|:|`, `::`)
+- **Chord tie coalescing** — `render_voice_to_absolute` refactored to a `tied_in` state machine.
+  Per-note ties across chords with mismatching pitch sets: `[CEG]-[CEF]` → C and E extend, G ends
+  at first-chord duration, F starts fresh at second-chord onset. Rest breaks the chord tie.
+  Dangling ties at end-of-body emit final `NoteOff`s for well-formed event streams.
+- **Voltas `[1`..`[4`** — `unroll_repeats` refactored to two-phase state machine
+  (`extract_repeat_block` + iteration expansion). Iteration count = `max(2, num_voltas)`;
+  missing indices leave that iteration to play the common section only. `[5]` still rejected.
+- **Repeat shorthand** — `::` = `RepeatEnd + RepeatStart` (end-then-start); `|:|` =
+  `Barline + RepeatStart`.
+- 12 new tests (`phase2c_*`); total 76 abc tests / 176 crate tests. Clippy pedantic clean.
 
 ### ⏳ Phase 3 — Symbolic Intent DSL integration
 
@@ -239,6 +246,29 @@ consumers (visualizers, exporters) see grace notes as normal short notes; nothin
 handle. (−) The ornament nature is lost after parsing — a round-trip back to ABC would produce
 literal short notes instead of `{...}` syntax. Acceptable for MVP; if a future ABC exporter needs
 fidelity, we can revisit with a dedicated variant.
+
+### ADR-009 — `tied_in` state machine unifies Note-tie and Chord-tie handling (2026-09-13)
+
+**Context**: Phase 2a implemented Note-tie coalescing with a `while cur_tie` scan-forward loop
+that produced a single merged `NoteOn`/`NoteOff` pair with summed ticks. Extending this to
+chord ties required tracking per-note continuations across chord boundaries with mismatched
+pitch sets. Two options:
+
+1. Keep the scan-forward pattern and grow it into a per-chord-note tracker.
+2. Refactor to a state machine that carries `tied_in: [u8; MAX_CHORD_NOTES]` between elements,
+   representing pitches currently sounding due to a tie into this position.
+
+**Decision**: Option 2 (state machine).
+
+**Consequences**: (+) Note-tie and Chord-tie share one implementation; both cases reduce to
+"is this pitch already sounding? then skip NoteOn; is this pitch tying forward? then defer
+NoteOff." (+) Cross-boundary partial overlap (`[CEG]-[CEF]`) falls out naturally — untied
+notes emit their own `NoteOff` at the from-chord's duration; new notes emit `NoteOn` at the
+to-chord's onset. (+) Rest handling (rests break ties) is explicit: flush `tied_in` at Rest.
+(+) End-of-body dangling ties are trivially handled by a final flush loop. (−) The old
+scan-forward loop was easier to reason about for the Note-only case; the new state machine
+requires understanding a small piece of stateful arithmetic. All Phase 2a Note-tie tests
+still pass unchanged.
 
 ### ADR-004 — Barlines emit no Score events in Phase 1 (2026-09-12)
 

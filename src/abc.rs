@@ -31,10 +31,16 @@
 //! - Grace notes: `{gab}c` → each inner note emitted as a `1/32` prefix `Note`
 //! - Multi-voice: `V:1` / `V:2` / … switch active voice; voice N renders to channel N-1
 //!
-//! # Not supported (Phase 2c or later)
+//! # Added in Phase 2c (2026-09-13)
 //!
-//! Microtonal accidentals, chord-level tie coalescing (chord `tie_follows` is parsed but not
-//! merged), volta numbers ≥ 3, repeat shorthand `::` / `|:|`.
+//! - Chord-level tie coalescing (per-note, across mismatched pitch sets): `[CEG]-[CEF]` ties
+//!   C and E while G ends normally and F starts fresh at the second-chord onset
+//! - Voltas `[1`..`[4` — any number of endings; iteration count = `max(2, num_voltas_defined)`
+//! - Repeat shorthand: `::` = end-then-start; `|:|` = barline immediately followed by repeat start
+//!
+//! # Not supported (Phase 3 or later)
+//!
+//! Microtonal accidentals, volta numbers ≥ 5.
 //!
 //! # Example
 //!
@@ -339,6 +345,11 @@ struct AbsoluteEvent {
 /// This is the multi-voice-aware core of [`AbcTune::to_score`]; the outer merge
 /// step is responsible for sorting the resulting stream and converting back to
 /// delta ticks.
+///
+/// Uses a `tied_in` state that tracks which MIDI pitches were emitted as
+/// `NoteOn` in a previous element and are still awaiting `NoteOff` due to a
+/// tie. This unifies Note-tie coalescing and Chord tie coalescing (Phase 2c);
+/// per-note ties across chords with mismatching pitch sets are supported.
 #[allow(clippy::too_many_lines)]
 fn render_voice_to_absolute(
     body: &[AbcElement],
@@ -348,6 +359,12 @@ fn render_voice_to_absolute(
 ) {
     let mut cursor: u32 = 0;
     let mut pending_delta: u32 = 0;
+    // Notes currently sounding (NoteOn emitted, NoteOff pending) because of a
+    // tie into this position. Fixed-size to keep `Copy`; up to MAX_CHORD_NOTES
+    // pitches can be carried across one boundary.
+    let mut tied_in: [u8; MAX_CHORD_NOTES] = [0; MAX_CHORD_NOTES];
+    let mut tied_in_count: u8 = 0;
+
     let mut i = 0;
     while i < body.len() {
         match body[i] {
@@ -357,55 +374,48 @@ fn render_voice_to_absolute(
                 den,
                 tie_follows,
             } => {
-                // Coalesce a chain of tied notes of the same pitch.
-                let mut total_ticks = duration_to_ticks(unit_ticks, num, den);
-                let mut cur_tie = tie_follows;
-                let mut next_i = i + 1;
-                while cur_tie && next_i < body.len() {
-                    let mut probe = next_i;
-                    while probe < body.len() && matches!(body[probe], AbcElement::Barline) {
-                        probe += 1;
-                    }
-                    if probe >= body.len() {
-                        break;
-                    }
-                    if let AbcElement::Note {
-                        midi: m2,
-                        num: n2,
-                        den: d2,
-                        tie_follows: tf2,
-                    } = body[probe]
-                    {
-                        if m2 == midi {
-                            total_ticks =
-                                total_ticks.saturating_add(duration_to_ticks(unit_ticks, n2, d2));
-                            cur_tie = tf2;
-                            next_i = probe + 1;
-                            continue;
-                        }
-                    }
-                    break;
-                }
                 cursor = cursor.saturating_add(pending_delta);
                 pending_delta = 0;
-                out.push(AbsoluteEvent {
-                    tick: cursor,
-                    channel,
-                    note: midi,
-                    velocity: 80,
-                    kind: NoteEventKind::NoteOn,
-                });
-                cursor = cursor.saturating_add(total_ticks);
-                out.push(AbsoluteEvent {
-                    tick: cursor,
-                    channel,
-                    note: midi,
-                    velocity: 0,
-                    kind: NoteEventKind::NoteOff,
-                });
-                i = next_i;
+                let ticks = duration_to_ticks(unit_ticks, num, den);
+                let ties_forward = tie_follows && next_element_contains_midi(body, i + 1, midi);
+
+                if !contains_midi(tied_in, tied_in_count, midi) {
+                    out.push(AbsoluteEvent {
+                        tick: cursor,
+                        channel,
+                        note: midi,
+                        velocity: 80,
+                        kind: NoteEventKind::NoteOn,
+                    });
+                }
+                cursor = cursor.saturating_add(ticks);
+                if ties_forward {
+                    tied_in[0] = midi;
+                    tied_in_count = 1;
+                } else {
+                    out.push(AbsoluteEvent {
+                        tick: cursor,
+                        channel,
+                        note: midi,
+                        velocity: 0,
+                        kind: NoteEventKind::NoteOff,
+                    });
+                    tied_in_count = 0;
+                }
+                i += 1;
             }
             AbcElement::Rest { num, den } => {
+                // Rests break any tie chain — flush pending NoteOffs before advancing.
+                for &note in &tied_in[..usize::from(tied_in_count)] {
+                    out.push(AbsoluteEvent {
+                        tick: cursor,
+                        channel,
+                        note,
+                        velocity: 0,
+                        kind: NoteEventKind::NoteOff,
+                    });
+                }
+                tied_in_count = 0;
                 pending_delta =
                     pending_delta.saturating_add(duration_to_ticks(unit_ticks, num, den));
                 i += 1;
@@ -415,32 +425,51 @@ fn render_voice_to_absolute(
                 count,
                 num,
                 den,
-                tie_follows: _,
+                tie_follows,
             } => {
                 cursor = cursor.saturating_add(pending_delta);
                 pending_delta = 0;
                 let cnt = usize::from(count);
                 let ticks = duration_to_ticks(unit_ticks, num, den);
-                for note in notes[..cnt].iter().copied() {
-                    out.push(AbsoluteEvent {
-                        tick: cursor,
-                        channel,
-                        note,
-                        velocity: 80,
-                        kind: NoteEventKind::NoteOn,
-                    });
+
+                // Compute which of this chord's notes tie into the following element.
+                let mut next_tied: [u8; MAX_CHORD_NOTES] = [0; MAX_CHORD_NOTES];
+                let mut next_tied_count: u8 = 0;
+                if tie_follows {
+                    for &note in &notes[..cnt] {
+                        if next_element_contains_midi(body, i + 1, note) {
+                            next_tied[usize::from(next_tied_count)] = note;
+                            next_tied_count += 1;
+                        }
+                    }
+                }
+
+                for &note in &notes[..cnt] {
+                    if !contains_midi(tied_in, tied_in_count, note) {
+                        out.push(AbsoluteEvent {
+                            tick: cursor,
+                            channel,
+                            note,
+                            velocity: 80,
+                            kind: NoteEventKind::NoteOn,
+                        });
+                    }
                 }
                 let off_tick = cursor.saturating_add(ticks);
-                for note in notes[..cnt].iter().copied() {
-                    out.push(AbsoluteEvent {
-                        tick: off_tick,
-                        channel,
-                        note,
-                        velocity: 0,
-                        kind: NoteEventKind::NoteOff,
-                    });
+                for &note in &notes[..cnt] {
+                    if !contains_midi(next_tied, next_tied_count, note) {
+                        out.push(AbsoluteEvent {
+                            tick: off_tick,
+                            channel,
+                            note,
+                            velocity: 0,
+                            kind: NoteEventKind::NoteOff,
+                        });
+                    }
                 }
                 cursor = off_tick;
+                tied_in = next_tied;
+                tied_in_count = next_tied_count;
                 i += 1;
             }
             AbcElement::Barline
@@ -450,6 +479,40 @@ fn render_voice_to_absolute(
                 i += 1;
             }
         }
+    }
+
+    // Any notes still sounding at end-of-body must have their NoteOff emitted so
+    // the event stream is well-formed (no dangling NoteOns).
+    for &note in &tied_in[..usize::from(tied_in_count)] {
+        out.push(AbsoluteEvent {
+            tick: cursor,
+            channel,
+            note,
+            velocity: 0,
+            kind: NoteEventKind::NoteOff,
+        });
+    }
+}
+
+/// Whether the fixed-size `tied_in` array contains `midi` in its first `count` slots.
+fn contains_midi(arr: [u8; MAX_CHORD_NOTES], count: u8, midi: u8) -> bool {
+    arr[..usize::from(count)].contains(&midi)
+}
+
+/// Returns whether the next Note/Chord in `body` (skipping barlines) contains
+/// the given MIDI pitch. Non-musical elements terminate the search.
+fn next_element_contains_midi(body: &[AbcElement], start: usize, midi: u8) -> bool {
+    let mut probe = start;
+    while probe < body.len() && matches!(body[probe], AbcElement::Barline) {
+        probe += 1;
+    }
+    if probe >= body.len() {
+        return false;
+    }
+    match body[probe] {
+        AbcElement::Note { midi: m2, .. } => m2 == midi,
+        AbcElement::Chord { notes, count, .. } => notes[..usize::from(count)].contains(&midi),
+        _ => false,
     }
 }
 
@@ -567,17 +630,15 @@ fn parse_voice_field(value: &str) -> Result<u8, AbcError> {
     Ok(num)
 }
 
-/// Expand `|:` `:|` blocks (with optional `[1` / `[2` voltas) into a linear body.
+/// Expand `|:` `:|` blocks (with any number of `[1`..`[4` voltas) into a linear body.
 ///
-/// Simple case (no voltas): `|: A :|` → `A A`.
-/// Volta case: `|: A [1 B :| [2 C |` → `A B A C |` (barlines / trailing markers are
-/// preserved for downstream tooling).
+/// - Simple case (no voltas): `|: A :|` → `A A` (two iterations).
+/// - Two voltas: `|: A [1 B :| [2 C |` → `A B A C`.
+/// - Three voltas: `|: A [1 B :| [2 C :| [3 D |` → `A B A C A D`.
 ///
-/// The unroller processes one repeat block per iteration and re-scans after each
-/// expansion, which keeps the algorithm linear in the number of repeat markers
-/// even though it uses `splice`. Nested repeats are not supported and produce
-/// [`AbcError::NestedRepeat`].
-#[allow(clippy::too_many_lines)]
+/// Iteration count is `max(2, num_voltas_defined)`. If a volta index is skipped
+/// (e.g. only `[1]` and `[3]` defined), the missing iteration plays the common
+/// section only. Nested repeats produce [`AbcError::NestedRepeat`].
 fn unroll_repeats(body: &mut Vec<AbcElement>) -> Result<(), AbcError> {
     let mut i = 0;
     while i < body.len() {
@@ -586,87 +647,26 @@ fn unroll_repeats(body: &mut Vec<AbcElement>) -> Result<(), AbcError> {
             continue;
         }
         let start = i;
+        let (common, voltas, replace_end) = extract_repeat_block(body, start)?;
 
-        // Locate matching RepeatEnd; error on nested RepeatStart.
-        let mut end_idx: Option<usize> = None;
-        for (offset, elem) in body.iter().enumerate().skip(start + 1) {
-            match elem {
-                AbcElement::RepeatStart => return Err(AbcError::NestedRepeat),
-                AbcElement::RepeatEnd => {
-                    end_idx = Some(offset);
-                    break;
-                }
-                _ => {}
+        // Iteration count is at least 2 (a bare `|: :|` still loops twice) and
+        // at least the highest volta index seen.
+        let num_iterations = voltas.len().max(2);
+        let expanded_len =
+            common.len() * num_iterations + voltas.iter().map(Vec::len).sum::<usize>();
+        let mut expanded: Vec<AbcElement> = Vec::with_capacity(expanded_len);
+        for iter in 0..num_iterations {
+            expanded.extend_from_slice(&common);
+            if let Some(ending) = voltas.get(iter) {
+                expanded.extend_from_slice(ending);
             }
         }
-        let end = end_idx.ok_or(AbcError::UnbalancedRepeat)?;
-
-        // Locate optional first-ending marker inside the repeat block.
-        let volta1 = ((start + 1)..end).find(|&k| matches!(body[k], AbcElement::VoltaStart(1)));
-
-        // Locate optional second-ending marker immediately after the RepeatEnd.
-        // Skip a single barline between `:|` and `[2` if present.
-        let volta2_marker = {
-            let mut probe = end + 1;
-            while probe < body.len() && matches!(body[probe], AbcElement::Barline) {
-                probe += 1;
-            }
-            if probe < body.len() && matches!(body[probe], AbcElement::VoltaStart(2)) {
-                Some(probe)
-            } else {
-                None
-            }
-        };
-
-        // Determine slice boundaries.
-        let common_end = volta1.unwrap_or(end);
-        let common: Vec<AbcElement> = body[(start + 1)..common_end].to_vec();
-        let first_ending: Vec<AbcElement> = if let Some(v1) = volta1 {
-            body[(v1 + 1)..end].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        // Second ending runs from after `[2` up to the next Barline / repeat marker
-        // / volta / end of body. That terminator itself is not consumed here so it
-        // stays in the body after splicing.
-        let (replace_end, second_ending): (usize, Vec<AbcElement>) = match volta2_marker {
-            Some(v2) => {
-                let content_start = v2 + 1;
-                let content_end = body
-                    .iter()
-                    .enumerate()
-                    .skip(content_start)
-                    .find(|(_, e)| {
-                        matches!(
-                            e,
-                            AbcElement::Barline
-                                | AbcElement::RepeatStart
-                                | AbcElement::RepeatEnd
-                                | AbcElement::VoltaStart(_)
-                        )
-                    })
-                    .map_or(body.len(), |(idx, _)| idx);
-                (content_end, body[content_start..content_end].to_vec())
-            }
-            None => (end + 1, Vec::new()),
-        };
-
-        let expanded_len = common.len() * 2 + first_ending.len() + second_ending.len();
-        let mut expanded: Vec<AbcElement> = Vec::with_capacity(expanded_len);
-        expanded.extend_from_slice(&common);
-        expanded.extend_from_slice(&first_ending);
-        expanded.extend_from_slice(&common);
-        expanded.extend_from_slice(&second_ending);
 
         body.splice(start..replace_end, expanded);
-
-        // Restart scan at `start` — the expansion may itself contain no repeat markers,
-        // but this keeps the loop invariant simple.
         i = start;
     }
 
-    // After unroll, any leftover markers (e.g. stray `[1` without a repeat block) are
+    // Any leftover markers (stray `[1` outside a repeat, unconsumed `:|`) are
     // dropped so `to_score()` never has to reason about them.
     body.retain(|e| {
         !matches!(
@@ -675,6 +675,92 @@ fn unroll_repeats(body: &mut Vec<AbcElement>) -> Result<(), AbcError> {
         )
     });
     Ok(())
+}
+
+/// Return type of [`extract_repeat_block`] — `(common, voltas_by_index, one_past_end)`.
+type RepeatBlock = (Vec<AbcElement>, Vec<Vec<AbcElement>>, usize);
+
+/// Walk a repeat block starting at `RepeatStart` (index `start` in `body`) and
+/// return `(common_section, voltas_by_index, one_past_last_consumed)`.
+///
+/// `voltas_by_index[N-1]` holds the content of the `[N` ending. Missing indices
+/// (e.g. `[1]` and `[3]` defined without `[2]`) leave the corresponding slot as
+/// an empty `Vec`. The consumed range spans from `start` up to (but not
+/// including) the first element outside the repeat block.
+fn extract_repeat_block(body: &[AbcElement], start: usize) -> Result<RepeatBlock, AbcError> {
+    let mut pos = start + 1;
+    let mut common: Vec<AbcElement> = Vec::new();
+    let mut voltas: Vec<Vec<AbcElement>> = Vec::new();
+
+    // Phase A — consume the common section until we hit VoltaStart or RepeatEnd.
+    while pos < body.len() {
+        match body[pos] {
+            AbcElement::RepeatStart => return Err(AbcError::NestedRepeat),
+            AbcElement::RepeatEnd | AbcElement::VoltaStart(_) => break,
+            other => {
+                common.push(other);
+                pos += 1;
+            }
+        }
+    }
+    if pos >= body.len() {
+        return Err(AbcError::UnbalancedRepeat);
+    }
+
+    // Phase B — consume endings. Each iteration reads a `VoltaStart(N)` (with
+    // associated content up to the next boundary) or a bare `RepeatEnd`, then
+    // checks whether another `[N]` ending follows.
+    loop {
+        match body.get(pos).copied() {
+            Some(AbcElement::VoltaStart(n)) => {
+                pos += 1;
+                let content_start = pos;
+                while pos < body.len()
+                    && !matches!(
+                        body[pos],
+                        AbcElement::RepeatStart
+                            | AbcElement::RepeatEnd
+                            | AbcElement::VoltaStart(_)
+                            | AbcElement::Barline
+                    )
+                {
+                    pos += 1;
+                }
+                let content: Vec<AbcElement> = body[content_start..pos].to_vec();
+                while voltas.len() < usize::from(n) {
+                    voltas.push(Vec::new());
+                }
+                voltas[usize::from(n) - 1] = content;
+
+                while pos < body.len() && matches!(body[pos], AbcElement::Barline) {
+                    pos += 1;
+                }
+                if pos < body.len() && matches!(body[pos], AbcElement::RepeatEnd) {
+                    pos += 1;
+                    while pos < body.len() && matches!(body[pos], AbcElement::Barline) {
+                        pos += 1;
+                    }
+                    if pos < body.len() && matches!(body[pos], AbcElement::VoltaStart(_)) {
+                        continue;
+                    }
+                }
+                break;
+            }
+            Some(AbcElement::RepeatEnd) => {
+                pos += 1;
+                while pos < body.len() && matches!(body[pos], AbcElement::Barline) {
+                    pos += 1;
+                }
+                if pos < body.len() && matches!(body[pos], AbcElement::VoltaStart(_)) {
+                    continue;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    Ok((common, voltas, pos))
 }
 
 fn parse_header_field(
@@ -904,8 +990,13 @@ fn parse_body_line(
                 i += 1; // consume `}`
             }
             b'|' => {
-                // `|:` = RepeatStart, else Barline (with `||`/`|]` swallowed)
-                if i + 1 < bytes.len() && bytes[i + 1] == b':' {
+                // Recognise `|:|` (end-then-start shorthand) before falling back to the
+                // simpler `|:` (RepeatStart) or `|` (Barline) forms.
+                if i + 2 < bytes.len() && bytes[i + 1] == b':' && bytes[i + 2] == b'|' {
+                    body.push(AbcElement::Barline);
+                    body.push(AbcElement::RepeatStart);
+                    i += 3;
+                } else if i + 1 < bytes.len() && bytes[i + 1] == b':' {
                     body.push(AbcElement::RepeatStart);
                     i += 2;
                 } else {
@@ -917,8 +1008,13 @@ fn parse_body_line(
                 }
             }
             b':' => {
-                // `:|` = RepeatEnd, else no-op (stray `:` treated as structural)
-                if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+                // `::` = RepeatEnd + RepeatStart (end-then-start). `:|` = RepeatEnd.
+                // A stray `:` is treated as structural (no-op).
+                if i + 1 < bytes.len() && bytes[i + 1] == b':' {
+                    body.push(AbcElement::RepeatEnd);
+                    body.push(AbcElement::RepeatStart);
+                    i += 2;
+                } else if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
                     body.push(AbcElement::RepeatEnd);
                     i += 2;
                     while i < bytes.len() && matches!(bytes[i], b'|' | b']') {
@@ -1150,7 +1246,7 @@ fn parse_volta(bytes: &[u8], start: usize, line_no: u16) -> Result<(AbcElement, 
     }
     let value = parse_u16(&bytes[digit_start..pos], line_no)?;
     let volta_u8 = u8::try_from(value).map_err(|_| AbcError::UnsupportedVolta)?;
-    if volta_u8 == 0 || volta_u8 > 2 {
+    if volta_u8 == 0 || volta_u8 > 4 {
         return Err(AbcError::UnsupportedVolta);
     }
     Ok((AbcElement::VoltaStart(volta_u8), pos - start))
@@ -1359,6 +1455,7 @@ fn parse_u16(bytes: &[u8], line_no: u16) -> Result<u16, AbcError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::naive_bytecount)]
 mod tests {
     use super::*;
 
@@ -1826,8 +1923,10 @@ mod tests {
     }
 
     #[test]
-    fn phase2a_volta_number_3_unsupported() {
-        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [3 C |\n";
+    fn phase2a_volta_number_5_unsupported() {
+        // Phase 2c raised the accepted range from `[1..=2]` to `[1..=4]`; `[5]`
+        // remains the first rejected value.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [5 C |\n";
         assert_eq!(parse(src).unwrap_err(), AbcError::UnsupportedVolta);
     }
 
@@ -2183,6 +2282,217 @@ mod tests {
         assert_eq!(score.events[0].delta_tick, 0);
         assert_eq!(score.events[0].note, 60);
         assert_eq!(score.events[1].delta_tick, 96);
+    }
+
+    // ---------- Phase 2c tests: chord tie / volta ≥ 3 / repeat shorthand ----------
+
+    #[test]
+    fn phase2c_chord_tie_identical_chords_merge() {
+        // [CEG]-[CEG] — all three notes tied; expect single NoteOn triad and single
+        // NoteOff triad at 2× duration.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG]-[CEG] |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        let on_events: Vec<&NoteEvent> = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOn)
+            .collect();
+        let off_events: Vec<&NoteEvent> = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOff)
+            .collect();
+        assert_eq!(on_events.len(), 3, "one NoteOn per pitch");
+        assert_eq!(off_events.len(), 3, "one NoteOff per pitch");
+        // All NoteOffs must fall at absolute tick 192 (2 × quarter at 96 tpq).
+        let total: u32 = score.events.iter().map(|e| u32::from(e.delta_tick)).sum();
+        assert_eq!(total, 192);
+    }
+
+    #[test]
+    fn phase2c_chord_tie_partial_overlap() {
+        // [CEG]-[CEF] — C and E tie forward, G ends normally, F starts fresh at
+        // the second chord's onset.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG]-[CEF] |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        let notes_on: Vec<u8> = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOn)
+            .map(|e| e.note)
+            .collect();
+        // C and E are only turned on once (from the first chord). G is on once.
+        // F is on once (from the second chord).
+        assert_eq!(notes_on.iter().filter(|&&n| n == 60).count(), 1);
+        assert_eq!(notes_on.iter().filter(|&&n| n == 64).count(), 1);
+        assert_eq!(notes_on.iter().filter(|&&n| n == 67).count(), 1);
+        assert_eq!(notes_on.iter().filter(|&&n| n == 65).count(), 1);
+        // 4 NoteOns total (C, E, G, F).
+        assert_eq!(notes_on.len(), 4);
+    }
+
+    #[test]
+    fn phase2c_chord_tie_into_note() {
+        // [CEG]-C — C ties forward into the single note, E/G end at the chord's own duration.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG]-C |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        let c_ons = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOn && e.note == 60)
+            .count();
+        assert_eq!(c_ons, 1, "C is on once (from the chord, extended)");
+    }
+
+    #[test]
+    fn phase2c_chord_tie_broken_by_rest() {
+        // [CEG]-z[CEG] — rest breaks the chord tie; expect two independent chord events.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG]-z[CEG] |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        let c_ons = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOn && e.note == 60)
+            .count();
+        assert_eq!(c_ons, 2, "rest breaks tie → C is on twice");
+    }
+
+    #[test]
+    fn phase2c_chord_tie_chain_three_chords() {
+        // [CEG]-[CEG]-[CEG] — triple-tied chord; each pitch on once, off once, at 3× duration.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG]-[CEG]-[CEG] |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        let c_ons = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOn && e.note == 60)
+            .count();
+        let c_offs = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOff && e.note == 60)
+            .count();
+        assert_eq!(c_ons, 1);
+        assert_eq!(c_offs, 1);
+        let total: u32 = score.events.iter().map(|e| u32::from(e.delta_tick)).sum();
+        assert_eq!(total, 288, "3 × 96");
+    }
+
+    #[test]
+    fn phase2c_volta_three_endings() {
+        // |: A [1 B :| [2 c :| [3 d | — three iterations.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [2 c :| [3 d |\n";
+        let tune = parse(src).expect("parse");
+        let midis: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        // A=69, B=71, c=72, d=74 (uppercase base octave 4, lowercase base octave 5).
+        assert_eq!(midis.as_slice(), &[69u8, 71, 69, 72, 69, 74][..]);
+    }
+
+    #[test]
+    fn phase2c_volta_four_endings() {
+        // Full four-ending block — four iterations.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [2 c :| [3 d :| [4 e |\n";
+        let tune = parse(src).expect("parse");
+        let midis: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        // A=69, B=71, c=72, d=74, e=76.
+        assert_eq!(midis.as_slice(), &[69u8, 71, 69, 72, 69, 74, 69, 76][..]);
+    }
+
+    #[test]
+    fn phase2c_volta_gap_between_indices() {
+        // Only [1] and [3] defined — middle iteration plays common only.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [3 c |\n";
+        let tune = parse(src).expect("parse");
+        let midis: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        // iter 1: A B; iter 2: A (no [2]); iter 3: A c.
+        assert_eq!(midis.as_slice(), &[69u8, 71, 69, 69, 72][..]);
+    }
+
+    #[test]
+    fn phase2c_repeat_shorthand_double_colon() {
+        // `::` = end-then-start shorthand for `:| |:` — the block splits into two
+        // repeat sections.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: C :: D :|\n";
+        let tune = parse(src).expect("parse");
+        // First block `|: C ::` → C C, second block `:: D :|` → D D. Unrolled: C C D D.
+        let midis: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(midis.as_slice(), &[60u8, 60, 62, 62][..]);
+    }
+
+    #[test]
+    fn phase2c_repeat_shorthand_bar_colon_bar() {
+        // `|:|` = `| |:` — a barline followed by a new repeat start.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nC |:| D :|\n";
+        let tune = parse(src).expect("parse");
+        let midis: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        // C (no repeat), then `|:` opens a repeat over D → D D. Total: C D D.
+        assert_eq!(midis.as_slice(), &[60u8, 62, 62][..]);
+    }
+
+    #[test]
+    fn phase2c_volta_five_still_unsupported() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n|: A [1 B :| [5 c |\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::UnsupportedVolta);
+    }
+
+    #[test]
+    fn phase2c_chord_tie_dangling_at_end() {
+        // A tie at end-of-body with no follow-up note must still emit a NoteOff
+        // (no dangling NoteOn).
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n[CEG]-\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        let ons = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOn)
+            .count();
+        let offs = score
+            .events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOff)
+            .count();
+        assert_eq!(ons, offs, "each NoteOn must have a matching NoteOff");
     }
 
     #[test]
