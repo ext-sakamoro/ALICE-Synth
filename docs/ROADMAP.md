@@ -84,15 +84,29 @@ Landed in the same v0.2.0-dev milestone as Phase 1b (single commit follow-up).
 - 19 new tests (`phase2a_*`); total 45 abc tests / 145 crate tests. Clippy pedantic clean, fmt
   clean, doctest passes, no_std + alloc build passes.
 
-### ⏳ Phase 2b — Extended ABC coverage
+### ✅ Phase 2b — Church modes / tuplets / grace notes / multi-voice (v0.2.0-dev, 2026-09-13)
 
-- Multi-voice `V:` support (multi-track output → Score channels)
-- Grace notes `{gab}` → very short prefix notes
-- Tuplets `(3abc` → 3-in-the-time-of-2 duration adjustment
-- Church modes (dor / mix / lyd / phr / loc / aeo) — currently only Ionian (major) and Aeolian (minor)
+- **Church modes** — `parse_key` refactored to compute `sharps = tonic_major_sharps + mode_offset`.
+  Dor / Mix / Lyd / Phr / Loc + Ion / Aeo synonyms accepted (long and short forms). Out-of-range
+  results return `AbcError::InvalidKey`.
+- **Tuplets** — `(P`, `(P:Q`, `(P:Q:R` forms parsed. Duration multipliers `q/p` applied to the next
+  `r` Note/Chord/Rest elements at parse time. New public struct `TupletState`; new error
+  `AbcError::UnsupportedTuplet`.
+- **Grace notes** — `{gab}c` groups expanded to `1/32`-duration `Note` events prepended to the main
+  note. Rests / chords inside grace groups are not supported. Grace notes do not consume tuplet
+  slots.
+- **Multi-voice `V:`** — `AbcTune` gained `extra_voices: Vec<Vec<AbcElement>>`. `V:N` field lines
+  switch the active voice both in the header block and between body lines. Voice N renders to
+  channel `N-1`; `to_score` refactored to an absolute-tick merge pipeline for correct cross-voice
+  ordering. New error `AbcError::InvalidVoice`.
+- 19 new tests (`phase2b_*`); total 65 abc tests / 164 crate tests. Clippy pedantic clean, fmt
+  clean, doctest passes, no_std + alloc build passes, stub grep clean.
+
+### ⏳ Phase 2c — Deferred ABC features
+
 - Chord-level tie coalescing (Phase 2a parses chord `tie_follows` but does not merge)
 - Volta numbers ≥ 3 (`[3` `[4`)
-- Repeat with symmetric first-ending short-hand (`|:|`, `::`)
+- Repeat with symmetric first-ending shorthand (`|:|`, `::`)
 
 ### ⏳ Phase 3 — Symbolic Intent DSL integration
 
@@ -194,6 +208,37 @@ is a single source of truth of the played sequence; downstream tooling (visualiz
 sees the same order the synth does. (−) Repeat structure is lost; round-tripping the body back
 to ABC text would produce an unrolled version. Acceptable for MVP — round-trip export is not a
 Phase 2 goal.
+
+### ADR-007 — Multi-voice as `extra_voices` field, not `voices: Vec<Vec<>>` (2026-09-13)
+
+**Context**: Multi-voice support needs a way to hold N parallel voice bodies. Two options:
+
+1. Replace `body: Vec<AbcElement>` with `voices: Vec<Vec<AbcElement>>`. Cleaner symmetric API but
+   forces every existing consumer to migrate from `tune.body` to `tune.voices[0]`.
+2. Keep `body` as voice 0 and add `extra_voices: Vec<Vec<AbcElement>>` for voices 2+.
+
+**Decision**: Option 2 (asymmetric).
+
+**Consequences**: (+) Zero-churn for existing single-voice consumers (`tune.body` still works). (+)
+Struct literals only need one new field (`extra_voices: Vec::new()`) — pattern matches with `..`
+are unaffected. (−) API is asymmetric — callers iterating over all voices must special-case
+voice 0. Provided as ergonomic trade-off; a helper method `voices_iter()` could be added later
+without further breakage if the asymmetry becomes painful.
+
+### ADR-008 — Grace notes rendered as `1/32` short notes, not a dedicated variant (2026-09-13)
+
+**Context**: Grace notes `{gab}c` are ornaments played very briefly before the main note. Options:
+
+1. New `AbcElement::Grace { notes, count }` variant, handled specially in `to_score`.
+2. Emit each inner note as a normal `Note` with fixed duration `1/32` at parse time.
+
+**Decision**: Option 2 (parse-time expansion).
+
+**Consequences**: (+) No new enum variant → no additional pattern-match churn. (+) Downstream
+consumers (visualizers, exporters) see grace notes as normal short notes; nothing special to
+handle. (−) The ornament nature is lost after parsing — a round-trip back to ABC would produce
+literal short notes instead of `{...}` syntax. Acceptable for MVP; if a future ABC exporter needs
+fidelity, we can revisit with a dedicated variant.
 
 ### ADR-004 — Barlines emit no Score events in Phase 1 (2026-09-12)
 

@@ -24,11 +24,17 @@
 //! - Annotations `"..."` — silently skipped
 //! - Line comments starting with `%`
 //!
-//! # Not supported (Phase 2b or later)
+//! # Added in Phase 2b (2026-09-13)
 //!
-//! Multi-voice (`V:`), grace notes `{}`, tuplets `(3`, church modes (dor/mix/lyd/phr/loc/aeo),
-//! microtonal accidentals, chord-level tie coalescing (chord `tie_follows` is parsed but
-//! not merged), volta numbers ≥ 3.
+//! - Church modes: Dor / Mix / Lyd / Phr / Loc + Ion / Aeo synonyms (30+ keys)
+//! - Tuplets: `(P`, `(P:Q`, `(P:Q:R` — duration multiplier applied to next `r` musical elements
+//! - Grace notes: `{gab}c` → each inner note emitted as a `1/32` prefix `Note`
+//! - Multi-voice: `V:1` / `V:2` / … switch active voice; voice N renders to channel N-1
+//!
+//! # Not supported (Phase 2c or later)
+//!
+//! Microtonal accidentals, chord-level tie coalescing (chord `tie_follows` is parsed but not
+//! merged), volta numbers ≥ 3, repeat shorthand `::` / `|:|`.
 //!
 //! # Example
 //!
@@ -45,7 +51,7 @@
 //! Author: Moroya Sakamoto
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use crate::score::{NoteEvent, NoteEventKind, Score, ScoreHeader};
 
@@ -82,6 +88,10 @@ pub enum AbcError {
     UnbalancedRepeat,
     /// `[N` volta indicator used with an unsupported number (Phase 2a supports 1..=2)
     UnsupportedVolta,
+    /// `(N` tuplet size outside the supported range 2..=9, or malformed `(P:Q:R` spec
+    UnsupportedTuplet,
+    /// `V:N` voice number outside 1..=16, or missing / non-numeric
+    InvalidVoice,
 }
 
 /// Canonical major key signature
@@ -230,12 +240,19 @@ impl Default for AbcHeader {
 }
 
 /// A parsed ABC tune
+///
+/// Voice 0 (the default / lead voice) lives in [`AbcTune::body`]. Additional
+/// voices declared via `V:2`, `V:3`, … appear in [`AbcTune::extra_voices`]
+/// (index `N-1` maps to `V:(N+1)`). Single-voice tunes leave `extra_voices`
+/// empty and are byte-for-byte compatible with pre-Phase-2b output.
 #[derive(Debug, Clone)]
 pub struct AbcTune {
     /// Playback-affecting header fields
     pub header: AbcHeader,
-    /// Body element sequence
+    /// Voice 0 body element sequence (the default / lead voice)
     pub body: Vec<AbcElement>,
+    /// Additional voices for `V:2` and above; each is an independent element sequence
+    pub extra_voices: Vec<Vec<AbcElement>>,
 }
 
 impl AbcTune {
@@ -255,136 +272,47 @@ impl AbcTune {
     /// - Repeat / volta markers are consumed by parse-time unrolling and should
     ///   never reach this method.
     ///
+    /// **Multi-voice** (Phase 2b): voice 0 renders to `channel = 0`; each extra
+    /// voice renders to `channel = voice_index + 1`. Voice event streams are
+    /// merged by absolute tick (stable-sorted) so simultaneous events across
+    /// voices retain their per-voice emission order.
+    ///
     /// The 4095-tick per-event delta limit imposed by [`NoteEvent`] is clamped;
     /// callers who need longer rests should split them at parse time.
-    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn to_score(&self, tick_div: u16) -> Score {
-        let mut score = Score {
+        let unit_ticks = self.unit_ticks(tick_div);
+        let mut absolute: Vec<AbsoluteEvent> = Vec::with_capacity(self.body.len() * 2);
+        render_voice_to_absolute(&self.body, 0, unit_ticks, &mut absolute);
+        for (idx, voice) in self.extra_voices.iter().enumerate() {
+            let channel = u8::try_from((idx + 1) & 0x0F).unwrap_or(15);
+            render_voice_to_absolute(voice, channel, unit_ticks, &mut absolute);
+        }
+        // Stable sort by absolute tick — preserves per-voice emission order for
+        // events sharing a tick, which is what NoteEvent delta semantics need.
+        absolute.sort_by_key(|e| e.tick);
+        let mut prev_tick: u32 = 0;
+        let mut events: Vec<NoteEvent> = Vec::with_capacity(absolute.len());
+        for e in absolute {
+            let delta_u32 = e.tick.saturating_sub(prev_tick);
+            events.push(NoteEvent {
+                delta_tick: u16::try_from(delta_u32.min(4095)).unwrap_or(4095),
+                channel: e.channel,
+                note: e.note,
+                velocity: e.velocity,
+                kind: e.kind,
+            });
+            prev_tick = e.tick;
+        }
+        let num_voices = 1 + self.extra_voices.len();
+        Score {
             header: ScoreHeader {
                 tempo_bpm: self.header.tempo_bpm,
-                tracks: 1,
+                tracks: u8::try_from(num_voices.min(16)).unwrap_or(1),
                 tick_div,
             },
-            events: Vec::with_capacity(self.body.len() * 2),
-        };
-        let unit_ticks = self.unit_ticks(tick_div);
-        let mut pending_delta: u32 = 0;
-        let mut i = 0;
-        while i < self.body.len() {
-            match self.body[i] {
-                AbcElement::Note {
-                    midi,
-                    num,
-                    den,
-                    tie_follows,
-                } => {
-                    // Coalesce a chain of tied notes of the same pitch.
-                    let mut total_ticks = duration_to_ticks(unit_ticks, num, den);
-                    let mut cur_tie = tie_follows;
-                    let mut next_i = i + 1;
-                    while cur_tie && next_i < self.body.len() {
-                        // Ignore transparent elements (barlines that may sit between
-                        // tied notes at bar boundaries).
-                        let mut probe = next_i;
-                        while probe < self.body.len()
-                            && matches!(self.body[probe], AbcElement::Barline)
-                        {
-                            probe += 1;
-                        }
-                        if probe >= self.body.len() {
-                            break;
-                        }
-                        if let AbcElement::Note {
-                            midi: m2,
-                            num: n2,
-                            den: d2,
-                            tie_follows: tf2,
-                        } = self.body[probe]
-                        {
-                            if m2 == midi {
-                                total_ticks = total_ticks
-                                    .saturating_add(duration_to_ticks(unit_ticks, n2, d2));
-                                cur_tie = tf2;
-                                next_i = probe + 1;
-                                continue;
-                            }
-                        }
-                        break;
-                    }
-                    let delta_on = u16::try_from(pending_delta.min(4095)).unwrap_or(4095);
-                    let delta_off = u16::try_from(total_ticks.min(4095)).unwrap_or(4095);
-                    score.events.push(NoteEvent {
-                        delta_tick: delta_on,
-                        channel: 0,
-                        note: midi,
-                        velocity: 80,
-                        kind: NoteEventKind::NoteOn,
-                    });
-                    score.events.push(NoteEvent {
-                        delta_tick: delta_off,
-                        channel: 0,
-                        note: midi,
-                        velocity: 0,
-                        kind: NoteEventKind::NoteOff,
-                    });
-                    pending_delta = 0;
-                    i = next_i;
-                }
-                AbcElement::Rest { num, den } => {
-                    let ticks = duration_to_ticks(unit_ticks, num, den);
-                    pending_delta = pending_delta.saturating_add(ticks);
-                    i += 1;
-                }
-                AbcElement::Chord {
-                    notes,
-                    count,
-                    num,
-                    den,
-                    tie_follows: _,
-                } => {
-                    let cnt = usize::from(count);
-                    let ticks = duration_to_ticks(unit_ticks, num, den);
-                    for (idx, note) in notes[..cnt].iter().copied().enumerate() {
-                        let delta = if idx == 0 {
-                            u16::try_from(pending_delta.min(4095)).unwrap_or(4095)
-                        } else {
-                            0
-                        };
-                        score.events.push(NoteEvent {
-                            delta_tick: delta,
-                            channel: 0,
-                            note,
-                            velocity: 80,
-                            kind: NoteEventKind::NoteOn,
-                        });
-                    }
-                    for (idx, note) in notes[..cnt].iter().copied().enumerate() {
-                        let delta = if idx == 0 {
-                            u16::try_from(ticks.min(4095)).unwrap_or(4095)
-                        } else {
-                            0
-                        };
-                        score.events.push(NoteEvent {
-                            delta_tick: delta,
-                            channel: 0,
-                            note,
-                            velocity: 0,
-                            kind: NoteEventKind::NoteOff,
-                        });
-                    }
-                    pending_delta = 0;
-                    i += 1;
-                }
-                AbcElement::Barline
-                | AbcElement::RepeatStart
-                | AbcElement::RepeatEnd
-                | AbcElement::VoltaStart(_) => {
-                    i += 1;
-                }
-            }
+            events,
         }
-        score
     }
 
     /// Number of ticks per unit note at the given tick division
@@ -393,6 +321,135 @@ impl AbcTune {
         // A whole note is `tick_div * 4` ticks; the unit note is `unit_num/unit_den` of that.
         let whole = u32::from(tick_div) * 4;
         whole * u32::from(self.header.unit_num) / u32::from(self.header.unit_den)
+    }
+}
+
+/// Internal absolute-tick event used while merging voices in [`AbcTune::to_score`].
+#[derive(Debug, Clone, Copy)]
+struct AbsoluteEvent {
+    tick: u32,
+    channel: u8,
+    note: u8,
+    velocity: u8,
+    kind: NoteEventKind,
+}
+
+/// Render one voice's body into absolute-tick events on the given channel.
+///
+/// This is the multi-voice-aware core of [`AbcTune::to_score`]; the outer merge
+/// step is responsible for sorting the resulting stream and converting back to
+/// delta ticks.
+#[allow(clippy::too_many_lines)]
+fn render_voice_to_absolute(
+    body: &[AbcElement],
+    channel: u8,
+    unit_ticks: u32,
+    out: &mut Vec<AbsoluteEvent>,
+) {
+    let mut cursor: u32 = 0;
+    let mut pending_delta: u32 = 0;
+    let mut i = 0;
+    while i < body.len() {
+        match body[i] {
+            AbcElement::Note {
+                midi,
+                num,
+                den,
+                tie_follows,
+            } => {
+                // Coalesce a chain of tied notes of the same pitch.
+                let mut total_ticks = duration_to_ticks(unit_ticks, num, den);
+                let mut cur_tie = tie_follows;
+                let mut next_i = i + 1;
+                while cur_tie && next_i < body.len() {
+                    let mut probe = next_i;
+                    while probe < body.len() && matches!(body[probe], AbcElement::Barline) {
+                        probe += 1;
+                    }
+                    if probe >= body.len() {
+                        break;
+                    }
+                    if let AbcElement::Note {
+                        midi: m2,
+                        num: n2,
+                        den: d2,
+                        tie_follows: tf2,
+                    } = body[probe]
+                    {
+                        if m2 == midi {
+                            total_ticks =
+                                total_ticks.saturating_add(duration_to_ticks(unit_ticks, n2, d2));
+                            cur_tie = tf2;
+                            next_i = probe + 1;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                cursor = cursor.saturating_add(pending_delta);
+                pending_delta = 0;
+                out.push(AbsoluteEvent {
+                    tick: cursor,
+                    channel,
+                    note: midi,
+                    velocity: 80,
+                    kind: NoteEventKind::NoteOn,
+                });
+                cursor = cursor.saturating_add(total_ticks);
+                out.push(AbsoluteEvent {
+                    tick: cursor,
+                    channel,
+                    note: midi,
+                    velocity: 0,
+                    kind: NoteEventKind::NoteOff,
+                });
+                i = next_i;
+            }
+            AbcElement::Rest { num, den } => {
+                pending_delta =
+                    pending_delta.saturating_add(duration_to_ticks(unit_ticks, num, den));
+                i += 1;
+            }
+            AbcElement::Chord {
+                notes,
+                count,
+                num,
+                den,
+                tie_follows: _,
+            } => {
+                cursor = cursor.saturating_add(pending_delta);
+                pending_delta = 0;
+                let cnt = usize::from(count);
+                let ticks = duration_to_ticks(unit_ticks, num, den);
+                for note in notes[..cnt].iter().copied() {
+                    out.push(AbsoluteEvent {
+                        tick: cursor,
+                        channel,
+                        note,
+                        velocity: 80,
+                        kind: NoteEventKind::NoteOn,
+                    });
+                }
+                let off_tick = cursor.saturating_add(ticks);
+                for note in notes[..cnt].iter().copied() {
+                    out.push(AbsoluteEvent {
+                        tick: off_tick,
+                        channel,
+                        note,
+                        velocity: 0,
+                        kind: NoteEventKind::NoteOff,
+                    });
+                }
+                cursor = off_tick;
+                i += 1;
+            }
+            AbcElement::Barline
+            | AbcElement::RepeatStart
+            | AbcElement::RepeatEnd
+            | AbcElement::VoltaStart(_) => {
+                i += 1;
+            }
+        }
     }
 }
 
@@ -414,9 +471,11 @@ fn duration_to_ticks(unit_ticks: u32, num: u16, den: u16) -> u32 {
 /// MIDI pitches, or duration overflow.
 pub fn parse(input: &str) -> Result<AbcTune, AbcError> {
     let mut header = AbcHeader::default();
-    let mut body: Vec<AbcElement> = Vec::new();
+    let mut voices: Vec<Vec<AbcElement>> = vec![Vec::new()];
+    let mut current_voice: usize = 0;
     let mut key_seen = false;
     let mut in_body = false;
+    let mut tuplet_state: Option<TupletState> = None;
 
     for (line_idx, raw_line) in input.lines().enumerate() {
         let line_no = u16::try_from(line_idx + 1).unwrap_or(u16::MAX);
@@ -426,12 +485,24 @@ pub fn parse(input: &str) -> Result<AbcTune, AbcError> {
             continue;
         }
 
-        let is_header_line = !in_body
-            && line.len() >= 2
+        let is_field_line = line.len() >= 2
             && line.as_bytes()[1] == b':'
             && line.as_bytes()[0].is_ascii_alphabetic();
 
-        if is_header_line {
+        // `V:N` is handled specially — voice switches may occur in either the
+        // header block or between body lines, so we bypass the header/body split.
+        if is_field_line && line.as_bytes()[0] == b'V' {
+            let voice_num = parse_voice_field(&line[2..])?;
+            let idx = usize::from(voice_num - 1);
+            while voices.len() <= idx {
+                voices.push(Vec::new());
+            }
+            current_voice = idx;
+            tuplet_state = None;
+            continue;
+        }
+
+        if !in_body && is_field_line {
             let field = line.as_bytes()[0];
             let value = line[2..].trim();
             parse_header_field(field, value, line_no, &mut header)?;
@@ -444,20 +515,56 @@ pub fn parse(input: &str) -> Result<AbcTune, AbcError> {
                 return Err(AbcError::MissingKey);
             }
             in_body = true;
-            parse_body_line(line, line_no, header.key, &mut body)?;
+            parse_body_line(
+                line,
+                line_no,
+                header.key,
+                &mut voices[current_voice],
+                &mut tuplet_state,
+            )?;
         }
     }
 
-    unroll_repeats(&mut body)?;
+    for voice in &mut voices {
+        unroll_repeats(voice)?;
+    }
 
-    if !body
+    let has_notes = voices
         .iter()
-        .any(|e| matches!(e, AbcElement::Note { .. } | AbcElement::Chord { .. }))
-    {
+        .flatten()
+        .any(|e| matches!(e, AbcElement::Note { .. } | AbcElement::Chord { .. }));
+    if !has_notes {
         return Err(AbcError::EmptyTune);
     }
 
-    Ok(AbcTune { header, body })
+    let body = voices.remove(0);
+    let extra_voices = voices;
+
+    Ok(AbcTune {
+        header,
+        body,
+        extra_voices,
+    })
+}
+
+/// Extract the numeric voice index from a `V:` header value.
+///
+/// Accepts a bare integer (`V:2`) or an integer followed by decorative attributes
+/// (`V:2 clef=bass`); only the numeric prefix is inspected. Voice numbers must
+/// be in `1..=16` to match [`NoteEvent`]'s 4-bit channel field.
+fn parse_voice_field(value: &str) -> Result<u8, AbcError> {
+    let trimmed = value.trim_start();
+    let digits: usize = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return Err(AbcError::InvalidVoice);
+    }
+    let num: u8 = trimmed[..digits]
+        .parse()
+        .map_err(|_| AbcError::InvalidVoice)?;
+    if !(1..=16).contains(&num) {
+        return Err(AbcError::InvalidVoice);
+    }
+    Ok(num)
 }
 
 /// Expand `|:` `:|` blocks (with optional `[1` / `[2` voltas) into a linear body.
@@ -634,29 +741,109 @@ fn parse_tempo(s: &str) -> Option<u16> {
 }
 
 fn parse_key(s: &str) -> Option<KeySignature> {
-    // Arms are grouped by shared sharp count so relative major/minor pairs sit
-    // together (e.g. C major and A minor are both 0). This also keeps clippy's
-    // `match_same_arms` lint happy without an allow attribute.
+    // Compute the sharp count as `tonic_major_sharps + mode_offset`. This keeps the
+    // Phase 2b mode expansion table-driven (15 tonics × 7 modes = 105 combinations)
+    // without exploding the match arm count.
     let core = s.split_whitespace().next()?;
-    let sharps = match core {
-        "C" | "Cmaj" | "CMaj" | "Am" | "Amin" => 0i8,
-        "G" | "Gmaj" | "Em" | "Emin" => 1,
-        "D" | "Dmaj" | "Bm" | "Bmin" => 2,
-        "A" | "Amaj" | "F#m" | "F#min" => 3,
-        "E" | "Emaj" | "C#m" | "C#min" => 4,
-        "B" | "Bmaj" | "G#m" | "G#min" => 5,
-        "F#" | "F#maj" | "D#m" | "D#min" => 6,
-        "C#" | "C#maj" | "A#m" | "A#min" => 7,
-        "F" | "Fmaj" | "Dm" | "Dmin" => -1,
-        "Bb" | "Bbmaj" | "Gm" | "Gmin" => -2,
-        "Eb" | "Ebmaj" | "Cm" | "Cmin" => -3,
-        "Ab" | "Abmaj" | "Fm" | "Fmin" => -4,
-        "Db" | "Dbmaj" | "Bbm" | "Bbmin" => -5,
-        "Gb" | "Gbmaj" | "Ebm" | "Ebmin" => -6,
-        "Cb" | "Cbmaj" | "Abm" | "Abmin" => -7,
-        _ => return None,
-    };
+    let (tonic, mode_suffix) = split_tonic_mode(core)?;
+    let tonic_sharps = tonic_major_sharps(tonic)?;
+    let mode_offset = mode_offset(mode_suffix)?;
+    let sharps = tonic_sharps.checked_add(mode_offset)?;
+    if !(-7..=7).contains(&sharps) {
+        return None;
+    }
     Some(KeySignature { sharps })
+}
+
+/// Split a key string like `"Ador"` into (tonic, mode-suffix). Tonic is 1-2 chars
+/// (letter plus optional `#`/`b`), remainder is the mode suffix (may be empty).
+fn split_tonic_mode(core: &str) -> Option<(&str, &str)> {
+    let bytes = core.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_alphabetic() {
+        return None;
+    }
+    let split = if bytes.len() > 1 && matches!(bytes[1], b'#' | b'b') {
+        // Only treat `b` as an accidental when the tonic letter is A-G *and* the
+        // following char isn't a mode letter — otherwise `Bmin` would be misread
+        // as tonic "Bb". Cheap disambiguation: check if the char after `b` is a
+        // vowel/consonant that starts a mode ("m" for minor is the only shared
+        // prefix; luckily `Bb` is followed by `m`/`maj`/end, and `Bm` starts with
+        // `m` directly). So we accept the naive 2-char tonic only when the tonic
+        // letter is uppercase A-G and the sharp/flat sign is a canonical modifier.
+        if bytes[1] == b'#' {
+            2
+        } else if bytes[1] == b'b' && bytes[0] >= b'A' && bytes[0] <= b'G' {
+            // Reject the ambiguous case `Bm`/`Bmin` (mode-only) by checking that
+            // the char after `b` (if any) is not a mode-continuation letter.
+            // Mode strings all start with a lowercase letter (a-z). To keep this
+            // simple: if the third char is `m` and the *fourth* char isn't `i`
+            // (for `min`) or end, then it's really `Xb` + `major`-ish. But this
+            // is getting fragile; the canonical solution is: `b` is only a flat
+            // accidental for the seven letters that can be flatted (B, E, A, D,
+            // G, C, F). B and E are the tricky ones because `Bm`/`Em` are valid
+            // minor keys. The disambiguator: `Bb` is always followed by end or a
+            // mode marker starting with `m` (`maj`/`min`) — so `Bm` vs `Bbm` we
+            // detect by peeking bytes[2]: if it exists and is `a` or `i`, then
+            // we have `Bmaj` or `Bmin` (so tonic is `B`, not `Bb`). Otherwise
+            // treat as `Bb` + rest.
+            if bytes.len() >= 3 && matches!(bytes[2], b'a' | b'i') {
+                1 // tonic is just `B`
+            } else {
+                2 // tonic is `Bb`
+            }
+        } else {
+            1
+        }
+    } else {
+        1
+    };
+    Some(core.split_at(split))
+}
+
+/// Sharp count of the tonic treated as an Ionian (major) key.
+///
+/// Extra tonics `G#`/`D#`/`A#` (with theoretical major sharp counts 8/9/10) are
+/// listed because they appear as valid *minor* / *modal* keys — the bounds check
+/// in [`parse_key`] rejects the final `sharps` when it falls outside `-7..=7`.
+fn tonic_major_sharps(t: &str) -> Option<i8> {
+    Some(match t {
+        "C" => 0,
+        "G" => 1,
+        "D" => 2,
+        "A" => 3,
+        "E" => 4,
+        "B" => 5,
+        "F#" => 6,
+        "C#" => 7,
+        "G#" => 8,
+        "D#" => 9,
+        "A#" => 10,
+        "F" => -1,
+        "Bb" => -2,
+        "Eb" => -3,
+        "Ab" => -4,
+        "Db" => -5,
+        "Gb" => -6,
+        "Cb" => -7,
+        _ => return None,
+    })
+}
+
+/// Sharp-count offset applied by a mode suffix relative to Ionian.
+///
+/// Canonical circle-of-fifths mode positions:
+/// Lyd(+1) Ion(0) Mix(-1) Dor(-2) Aeo(-3) Phr(-4) Loc(-5)
+fn mode_offset(suffix: &str) -> Option<i8> {
+    Some(match suffix {
+        "" | "maj" | "Maj" | "major" | "Major" | "ion" | "Ion" | "ionian" | "Ionian" => 0,
+        "m" | "min" | "aeo" | "Aeo" | "aeolian" | "Aeolian" | "minor" | "Minor" => -3,
+        "dor" | "Dor" | "dorian" | "Dorian" => -2,
+        "phr" | "Phr" | "phrygian" | "Phrygian" => -4,
+        "lyd" | "Lyd" | "lydian" | "Lydian" => 1,
+        "mix" | "Mix" | "mixolydian" | "Mixolydian" => -1,
+        "loc" | "Loc" | "locrian" | "Locrian" => -5,
+        _ => return None,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -665,6 +852,7 @@ fn parse_body_line(
     line_no: u16,
     key: KeySignature,
     body: &mut Vec<AbcElement>,
+    tuplet_state: &mut Option<TupletState>,
 ) -> Result<(), AbcError> {
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -672,6 +860,49 @@ fn parse_body_line(
         let c = bytes[i];
         match c {
             b'%' => break, // rest of line is a comment
+            b'(' => {
+                // `(N` — tuplet spec. Else regular open-paren (slur/grouping) — skip.
+                if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                    let (spec, consumed) = parse_tuplet(bytes, i, line_no)?;
+                    *tuplet_state = Some(spec);
+                    i += consumed;
+                    continue;
+                }
+                i += 1;
+            }
+            b'{' => {
+                // Grace-note group `{...}`. Expand each inner note as a normal Note
+                // with duration (1, 32); rests/chords inside grace groups are not
+                // supported and produce UnexpectedChar. Tuplet state is *not*
+                // consumed by grace notes.
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'}' {
+                    match bytes[i] {
+                        b' ' | b'\t' => {
+                            i += 1;
+                        }
+                        b'^' | b'_' | b'=' | b'A'..=b'G' | b'a'..=b'g' => {
+                            let (midi, consumed) = parse_note(bytes, i, line_no, key)?;
+                            // Grace notes ignore any duration suffix in ABC MVP — they
+                            // always render as a 1/32 note.
+                            body.push(AbcElement::Note {
+                                midi,
+                                num: 1,
+                                den: 32,
+                                tie_follows: false,
+                            });
+                            i += consumed;
+                        }
+                        ch => {
+                            return Err(AbcError::UnexpectedChar { line: line_no, ch });
+                        }
+                    }
+                }
+                if i >= bytes.len() {
+                    return Err(AbcError::UnbalancedChord); // reuse: unbalanced `{`
+                }
+                i += 1; // consume `}`
+            }
             b'|' => {
                 // `|:` = RepeatStart, else Barline (with `||`/`|]` swallowed)
                 if i + 1 < bytes.len() && bytes[i + 1] == b':' {
@@ -721,13 +952,14 @@ fn parse_body_line(
                 // Chord
                 let (chord, consumed) = parse_chord(bytes, i, line_no, key)?;
                 body.push(chord);
+                apply_tuplet(body, tuplet_state);
                 i += consumed;
             }
-            b' ' | b'\t' | b'\r' | b']' | b'-' | b'(' | b')' | b'{' | b'}' | b'*' | b'.' | b'~'
-            | b'>' | b'<' => {
+            b' ' | b'\t' | b'\r' | b']' | b'-' | b')' | b'*' | b'.' | b'~' | b'>' | b'<' => {
                 // Structural / decoration characters — silently skipped.
                 // `-` here handles stray ties (a `-` right after a note is instead absorbed
-                // by the note branch below).
+                // by the note branch below); `(`, `{`, `}` are handled by their own
+                // dedicated branches for tuplets and grace notes.
                 i += 1;
             }
             b'!' => {
@@ -764,12 +996,14 @@ fn parse_body_line(
                     den,
                     tie_follows,
                 });
+                apply_tuplet(body, tuplet_state);
                 i = cursor;
             }
             b'z' | b'Z' | b'x' | b'X' => {
                 i += 1;
                 let (num, den, dur_consumed) = parse_duration(bytes, i, line_no)?;
                 body.push(AbcElement::Rest { num, den });
+                apply_tuplet(body, tuplet_state);
                 i += dur_consumed;
             }
             _ => {
@@ -781,6 +1015,122 @@ fn parse_body_line(
         }
     }
     Ok(())
+}
+
+/// Active tuplet coverage: `q/p` duration multiplier applied to the next
+/// `r_remaining` musical elements (Note / Chord / Rest).
+#[derive(Debug, Clone, Copy)]
+pub struct TupletState {
+    /// Tuplet size — how many notes are being played
+    pub p: u8,
+    /// Time-count — the notes take the space of `q` normal notes
+    pub q: u8,
+    /// Remaining notes still to receive the multiplier
+    pub r_remaining: u8,
+}
+
+/// Default `q` value for a bare `(P` tuplet spec, per ABC 2.1.
+const fn default_tuplet_q(p: u8) -> u8 {
+    match p {
+        2 | 4 | 8 => 3,
+        _ => 2,
+    }
+}
+
+/// Parse a tuplet spec `(P`, `(P:Q`, or `(P:Q:R` starting at `(`.
+///
+/// Returns the initial [`TupletState`] and the byte length consumed. Missing `Q`
+/// falls back to [`default_tuplet_q`]; missing `R` defaults to `P`.
+fn parse_tuplet(
+    bytes: &[u8],
+    start: usize,
+    line_no: u16,
+) -> Result<(TupletState, usize), AbcError> {
+    let mut pos = start + 1;
+    let (p_val, p_len) = read_digits(bytes, pos, line_no)?;
+    if p_len == 0 {
+        return Err(AbcError::UnsupportedTuplet);
+    }
+    pos += p_len;
+    let p = u8::try_from(p_val).map_err(|_| AbcError::UnsupportedTuplet)?;
+    if !(2..=9).contains(&p) {
+        return Err(AbcError::UnsupportedTuplet);
+    }
+
+    let mut q = default_tuplet_q(p);
+    let mut r = p;
+
+    if pos < bytes.len() && bytes[pos] == b':' {
+        pos += 1;
+        let (q_val, q_len) = read_digits(bytes, pos, line_no)?;
+        if q_len > 0 {
+            q = u8::try_from(q_val).map_err(|_| AbcError::UnsupportedTuplet)?;
+        }
+        pos += q_len;
+
+        if pos < bytes.len() && bytes[pos] == b':' {
+            pos += 1;
+            let (r_val, r_len) = read_digits(bytes, pos, line_no)?;
+            if r_len > 0 {
+                r = u8::try_from(r_val).map_err(|_| AbcError::UnsupportedTuplet)?;
+            }
+            pos += r_len;
+        }
+    }
+
+    if q == 0 || r == 0 {
+        return Err(AbcError::UnsupportedTuplet);
+    }
+
+    Ok((
+        TupletState {
+            p,
+            q,
+            r_remaining: r,
+        },
+        pos - start,
+    ))
+}
+
+/// Read a run of ASCII digits starting at `pos`. Returns `(value, byte_length)`.
+fn read_digits(bytes: &[u8], pos: usize, line_no: u16) -> Result<(u16, usize), AbcError> {
+    let start = pos;
+    let mut end = pos;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == start {
+        return Ok((0, 0));
+    }
+    let value = parse_u16(&bytes[start..end], line_no)?;
+    Ok((value, end - start))
+}
+
+/// Apply the active tuplet's `q/p` multiplier to the most recently pushed
+/// musical element (Note / Chord / Rest) and decrement `r_remaining`.
+fn apply_tuplet(body: &mut [AbcElement], state: &mut Option<TupletState>) {
+    let Some(mut ts) = *state else {
+        return;
+    };
+    let (p16, q16) = (u16::from(ts.p), u16::from(ts.q));
+    if let Some(last) = body.last_mut() {
+        match last {
+            AbcElement::Note { num, den, .. }
+            | AbcElement::Rest { num, den }
+            | AbcElement::Chord { num, den, .. } => {
+                *num = num.saturating_mul(q16);
+                *den = den.saturating_mul(p16);
+            }
+            _ => {
+                // Non-musical element (e.g. Barline) — no adjustment; also do not
+                // decrement r_remaining so the multiplier still applies to the next
+                // actual note.
+                return;
+            }
+        }
+    }
+    ts.r_remaining -= 1;
+    *state = if ts.r_remaining == 0 { None } else { Some(ts) };
 }
 
 /// Parse a volta marker `[N` starting at `[`. Returns the marker and bytes consumed.
@@ -1588,6 +1938,253 @@ mod tests {
         }
     }
 
+    // ---------- Phase 2b tests: church modes / tuplets / grace / multi-voice ----------
+
+    #[test]
+    fn phase2b_mode_dorian_shifts_sharps() {
+        // A Dorian = A major (3 sharps) - 2 = 1 sharp
+        let src = "X:1\nM:4/4\nL:1/4\nK:Ador\nC |\n";
+        let tune = parse(src).expect("parse");
+        assert_eq!(tune.header.key.sharps, 1);
+    }
+
+    #[test]
+    fn phase2b_mode_mixolydian_shifts_sharps() {
+        // G Mixolydian = G major (1 sharp) - 1 = 0 sharps
+        let src = "X:1\nM:4/4\nL:1/4\nK:Gmix\nC |\n";
+        let tune = parse(src).expect("parse");
+        assert_eq!(tune.header.key.sharps, 0);
+    }
+
+    #[test]
+    fn phase2b_mode_lydian_shifts_sharps() {
+        // F Lydian = F major (-1) + 1 = 0 sharps
+        let src = "X:1\nM:4/4\nL:1/4\nK:Flyd\nC |\n";
+        let tune = parse(src).expect("parse");
+        assert_eq!(tune.header.key.sharps, 0);
+    }
+
+    #[test]
+    fn phase2b_mode_phrygian_shifts_sharps() {
+        // E Phrygian = E major (4) - 4 = 0 sharps
+        let src = "X:1\nM:4/4\nL:1/4\nK:Ephr\nC |\n";
+        let tune = parse(src).expect("parse");
+        assert_eq!(tune.header.key.sharps, 0);
+    }
+
+    #[test]
+    fn phase2b_mode_locrian_shifts_sharps() {
+        // B Locrian = B major (5) - 5 = 0 sharps
+        let src = "X:1\nM:4/4\nL:1/4\nK:Bloc\nC |\n";
+        let tune = parse(src).expect("parse");
+        assert_eq!(tune.header.key.sharps, 0);
+    }
+
+    #[test]
+    fn phase2b_mode_ionian_synonym_equals_major() {
+        let src_ion = "X:1\nM:4/4\nL:1/4\nK:Cion\nC |\n";
+        let src_maj = "X:1\nM:4/4\nL:1/4\nK:C\nC |\n";
+        assert_eq!(
+            parse(src_ion).expect("Cion").header.key.sharps,
+            parse(src_maj).expect("C").header.key.sharps
+        );
+    }
+
+    #[test]
+    fn phase2b_mode_out_of_range_rejected() {
+        // G# major = 8 sharps; G# Lydian = 9 → out of range.
+        let src = "X:1\nM:4/4\nL:1/4\nK:G#lyd\nC |\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::InvalidKey);
+    }
+
+    #[test]
+    fn phase2b_triplet_shortens_notes() {
+        // (3 C C C — three quarter notes take the space of 2 → each note = 2/3 L
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n(3 C C C |\n";
+        let tune = parse(src).expect("parse");
+        let pairs: Vec<(u16, u16)> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { num, den, .. } => Some((*num, *den)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pairs.as_slice(), &[(2, 3), (2, 3), (2, 3)][..]);
+    }
+
+    #[test]
+    fn phase2b_duplet_stretches_notes() {
+        // (2 C C — two notes take the space of 3 → each = 3/2 L
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n(2 C C |\n";
+        let tune = parse(src).expect("parse");
+        let pairs: Vec<(u16, u16)> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { num, den, .. } => Some((*num, *den)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pairs.as_slice(), &[(3, 2), (3, 2)][..]);
+    }
+
+    #[test]
+    fn phase2b_tuplet_only_applies_to_r_notes() {
+        // (3 in a row = 3 notes; the fourth is back to normal.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n(3 C C C D |\n";
+        let tune = parse(src).expect("parse");
+        let pairs: Vec<(u16, u16)> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { num, den, .. } => Some((*num, *den)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pairs.as_slice(), &[(2, 3), (2, 3), (2, 3), (1, 1)][..]);
+    }
+
+    #[test]
+    fn phase2b_tuplet_full_form_p_q_r() {
+        // (5:2:3 — 5-in-2 ratio applied to only 3 notes (uncommon but supported)
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n(5:2:3 C C C D E |\n";
+        let tune = parse(src).expect("parse");
+        let pairs: Vec<(u16, u16)> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { num, den, .. } => Some((*num, *den)),
+                _ => None,
+            })
+            .collect();
+        // First 3 notes get (2, 5) multiplier, last 2 are normal
+        assert_eq!(
+            pairs.as_slice(),
+            &[(2, 5), (2, 5), (2, 5), (1, 1), (1, 1)][..]
+        );
+    }
+
+    #[test]
+    fn phase2b_tuplet_out_of_range_errors() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n(1 C |\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::UnsupportedTuplet);
+    }
+
+    #[test]
+    fn phase2b_grace_notes_emit_short_notes() {
+        // {ab}c — two grace notes (1/32 each) prepended to c.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n{ab}c |\n";
+        let tune = parse(src).expect("parse");
+        let notes: Vec<(u8, u16, u16)> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, num, den, .. } => Some((*midi, *num, *den)),
+                _ => None,
+            })
+            .collect();
+        // a=69+12=81 (a is lowercase = C5 base), b=83, c=72.
+        // Wait: lowercase a = A5 (MIDI 81), lowercase b = B5 (MIDI 83), lowercase c = C5 (MIDI 72).
+        assert_eq!(notes.len(), 3);
+        assert_eq!(notes[0], (81, 1, 32));
+        assert_eq!(notes[1], (83, 1, 32));
+        assert_eq!(notes[2], (72, 1, 1));
+    }
+
+    #[test]
+    fn phase2b_grace_empty_group_is_allowed() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\n{}c |\n";
+        let tune = parse(src).expect("parse");
+        let note_count = tune
+            .body
+            .iter()
+            .filter(|e| matches!(e, AbcElement::Note { .. }))
+            .count();
+        assert_eq!(note_count, 1);
+    }
+
+    #[test]
+    fn phase2b_multi_voice_two_voices_populated() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nV:1\nC D |\nV:2\nc, d, |\n";
+        let tune = parse(src).expect("parse");
+        assert_eq!(tune.extra_voices.len(), 1);
+        let v0_notes: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        let v1_notes: Vec<u8> = tune.extra_voices[0]
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(v0_notes.as_slice(), &[60u8, 62][..]); // C4, D4
+        assert_eq!(v1_notes.as_slice(), &[60u8, 62][..]); // c, and d, drop back to octave 4
+    }
+
+    #[test]
+    fn phase2b_multi_voice_channels_in_score() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nV:1\nC |\nV:2\nG |\n";
+        let tune = parse(src).expect("parse");
+        let score = tune.to_score(96);
+        assert_eq!(score.header.tracks, 2);
+        // Both voices start at absolute tick 0, so events on both channels are
+        // emitted at delta 0 (stable sort keeps voice-0 events first).
+        let v0_on = score
+            .events
+            .iter()
+            .find(|e| e.kind == NoteEventKind::NoteOn && e.channel == 0)
+            .expect("voice 0 NoteOn");
+        let v1_on = score
+            .events
+            .iter()
+            .find(|e| e.kind == NoteEventKind::NoteOn && e.channel == 1)
+            .expect("voice 1 NoteOn");
+        assert_eq!(v0_on.note, 60);
+        assert_eq!(v1_on.note, 67);
+    }
+
+    #[test]
+    fn phase2b_multi_voice_invalid_number_errors() {
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nV:0\nC |\n";
+        assert_eq!(parse(src).unwrap_err(), AbcError::InvalidVoice);
+    }
+
+    #[test]
+    fn phase2b_multi_voice_switch_mid_tune() {
+        // Voice 1 plays C, switch to V:2, play E, switch back to V:1, play D.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nV:1\nC |\nV:2\nE |\nV:1\nD |\n";
+        let tune = parse(src).expect("parse");
+        let v0_notes: Vec<u8> = tune
+            .body
+            .iter()
+            .filter_map(|e| match e {
+                AbcElement::Note { midi, .. } => Some(*midi),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(v0_notes.as_slice(), &[60u8, 62][..]);
+    }
+
+    #[test]
+    fn phase2b_single_voice_default_unchanged() {
+        // Regression: single-voice tunes must produce identical output to Phase 2a.
+        let src = "X:1\nM:4/4\nL:1/4\nK:C\nC D |\n";
+        let tune = parse(src).expect("parse");
+        assert!(tune.extra_voices.is_empty());
+        let score = tune.to_score(96);
+        assert_eq!(score.header.tracks, 1);
+        assert_eq!(score.events[0].delta_tick, 0);
+        assert_eq!(score.events[0].note, 60);
+        assert_eq!(score.events[1].delta_tick, 96);
+    }
+
     #[test]
     fn end_to_end_abc_to_pcm_via_synthesizer() {
         // Full pipeline validation: ABC text → AbcTune → Score → Synthesizer → PCM samples.
@@ -1624,6 +2221,7 @@ mod tests {
         let tune = AbcTune {
             header: header_quarter,
             body: Vec::new(),
+            extra_voices: Vec::new(),
         };
         assert_eq!(tune.unit_ticks(96), 96); // quarter at 96 tpq = 96 ticks
         assert_eq!(tune.unit_ticks(48), 48);
@@ -1636,6 +2234,7 @@ mod tests {
         let tune8 = AbcTune {
             header: header_eighth,
             body: Vec::new(),
+            extra_voices: Vec::new(),
         };
         assert_eq!(tune8.unit_ticks(96), 48); // eighth = half of quarter
     }

@@ -33,6 +33,29 @@ All notable changes to ALICE-Synth will be documented in this file.
 - `AbcElement::Note` gained a required `tie_follows: bool` field. Pattern matches must add either
   `tie_follows` or `..`. Documented in `docs/ROADMAP.md` ADR-005.
 
+### Added — Phase 2b (church modes / tuplets / grace notes / multi-voice)
+- **Church modes** — `parse_key` refactored to a tonic + mode-suffix computed table. Dor/Mix/Lyd/Phr/Loc
+  + Ion/Aeo synonyms accepted; sharp counts derived as `tonic_major_sharps + mode_offset`. Out-of-range
+  combinations return `AbcError::InvalidKey`.
+- **Tuplets** — `(P`, `(P:Q`, `(P:Q:R` forms parsed. Duration multipliers `q/p` applied to the next `r`
+  Note/Chord/Rest elements at parse time; bare `(P` uses ABC 2.1 default `q` values. New public struct
+  `TupletState`; new error `AbcError::UnsupportedTuplet`.
+- **Grace notes** — `{gab}c` groups parsed. Each inner note is emitted as a `1/32`-duration `Note`
+  before the following main note; rests / chords inside grace groups are not supported (produce
+  `UnexpectedChar`); grace notes do not consume tuplet slots.
+- **Multi-voice** — `AbcTune` gained `extra_voices: Vec<Vec<AbcElement>>`; voice 0 stays in `body`.
+  `V:N` field lines switch the active voice both in the header block and between body lines. Voice `N`
+  renders to `channel = N-1` in the emitted `Score`; `Score.header.tracks` reflects the voice count.
+  New error `AbcError::InvalidVoice`.
+- `to_score` refactored to an absolute-tick merge pipeline (`render_voice_to_absolute` → stable sort →
+  delta conversion) to enable correct cross-voice event ordering. Single-voice output is unchanged.
+- 19 new unit tests (`phase2b_*`); **total 65 abc tests, 164 crate tests**. Clippy pedantic clean.
+
+### Changed — Phase 2b (additive; pattern-match compatible)
+- `AbcTune` gained the `extra_voices` field. Struct literals must include it (single-voice case:
+  `extra_voices: Vec::new()`). Existing pattern matches using `AbcTune { header, body, .. }` remain
+  unaffected. Documented in `docs/ROADMAP.md` ADR-007.
+
 ## [0.1.1] - 2026-03-04
 
 ### Added
