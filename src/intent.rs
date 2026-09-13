@@ -317,6 +317,42 @@ impl MusicIntent {
     }
 }
 
+/// Contract for a generator that turns a [`MusicIntent`] into an [`AbcTune`].
+///
+/// The default implementation [`ProceduralPlanHead`] wraps
+/// [`MusicIntent::synthesize`] verbatim. Alternate implementations (e.g. an
+/// LLM-driven plan head living in ALICE-LLM, or a network client that
+/// delegates to a remote server) can be plugged in without changing the
+/// 8-byte packet wire format.
+///
+/// This is the canonical extension point promised by ADR-011.
+///
+/// ```
+/// use alice_synth::intent::{MusicIntent, PlanHead, ProceduralPlanHead};
+///
+/// let head = ProceduralPlanHead;
+/// let tune = head.plan(&MusicIntent::DEFAULT_C_MAJOR);
+/// assert_eq!(tune.header.tempo_bpm, 120);
+/// ```
+pub trait PlanHead {
+    /// Produce an [`AbcTune`] for the given intent packet.
+    fn plan(&self, intent: &MusicIntent) -> AbcTune;
+}
+
+/// The default plan head — delegates to [`MusicIntent::synthesize`].
+///
+/// This is a zero-sized type so callers can pass it by value without heap
+/// allocation. Concrete alternate plan heads (LLM-driven, remote client, …)
+/// live in downstream crates.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProceduralPlanHead;
+
+impl PlanHead for ProceduralPlanHead {
+    fn plan(&self, intent: &MusicIntent) -> AbcTune {
+        intent.synthesize()
+    }
+}
+
 // ---------- Internal tables (module-private) ----------
 
 /// Sharp count of each canonical tonic treated as an Ionian (major) key.
@@ -745,6 +781,37 @@ mod tests {
         let h1 = fnv1a_seed(&tune.body);
         let h2 = fnv1a_seed(&tune.body);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn plan_head_procedural_matches_synthesize_directly() {
+        let intent = MusicIntent::DEFAULT_C_MAJOR;
+        let head = ProceduralPlanHead;
+        let direct = intent.synthesize();
+        let via_trait = head.plan(&intent);
+        // Both must produce byte-identical Score events.
+        let direct_score = direct.to_score(96);
+        let trait_score = via_trait.to_score(96);
+        assert_eq!(direct_score.header.tempo_bpm, trait_score.header.tempo_bpm);
+        assert_eq!(direct_score.events.len(), trait_score.events.len());
+        for (a, b) in direct_score.events.iter().zip(trait_score.events.iter()) {
+            assert_eq!(a.delta_tick, b.delta_tick);
+            assert_eq!(a.note, b.note);
+            assert_eq!(a.kind, b.kind);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn plan_head_trait_is_object_safe() {
+        // Ensures the trait can be used as `Box<dyn PlanHead>` — required for
+        // downstream crates to swap in an LLM-backed implementation at runtime.
+        // Gated on `std` because `Box` needs the alloc crate visible under a
+        // specific path; the trait's dyn-safety is a compile-time property that
+        // the presence of this test alone verifies.
+        let head: Box<dyn PlanHead> = Box::new(ProceduralPlanHead);
+        let tune = head.plan(&MusicIntent::DEFAULT_C_MAJOR);
+        assert_eq!(tune.header.tempo_bpm, 120);
     }
 
     #[test]

@@ -114,6 +114,40 @@ All notable changes to ALICE-Synth will be documented in this file.
   LLM-driven plan head can slot in as an alternate `synthesize` implementation without
   changing the `MusicIntent` wire format.
 
+### Added — Phase 3.1 (cross-crate integration + local editing / cover APIs)
+- **`PlanHead` trait + `ProceduralPlanHead`** in `intent` module — canonical extension point
+  for LLM-driven `synthesize` alternatives. Object-safe so downstream crates can swap in a
+  `Box<dyn PlanHead>` at runtime. `ProceduralPlanHead` delegates to `MusicIntent::synthesize`.
+- **`agentic` feature** (`feature = "agentic"`, implies `abc`) — new module `src/agentic.rs`
+  (~330 LoC + 13 tests) with `AbcDiff::compute` / `AbcDiff::apply` and
+  `AbcTune::diff` / `AbcTune::patch` convenience methods. Position-based diff (per-index
+  additions / removals / replacements + optional header overrides for tempo and key).
+  Preserves `extra_voices` verbatim through round trips.
+- **`cover` feature** (`feature = "cover"`, implies `intent`) — new module `src/cover.rs`
+  (~290 LoC + 6 tests) with `Transcriber` trait, `TranscribeError` (Copy enum), and
+  `CoverPipeline<T, P>`. Zero-shot cover pipeline: audio → transcribe → extract
+  `MusicIntent` → apply target genre/mood/mode → re-synthesize. Concrete transcribers live
+  in downstream crates (external ML model wrappers).
+- Cross-crate contract: ALICE-LOL side (commit `c41de9b` on the ALICE-LOL repo) added
+  `IntentNode::Music { packet: [u8; 8] }` and `music_intent()` constructor. LOL programs can
+  now carry `MusicIntent` packets alongside physical verbs (grasp / walk / etc.). No
+  dependency edge added — both sides speak the 8-byte contract without a shared crate.
+- 22 new unit tests (2 PlanHead + 13 agentic + 6 cover + 1 dyn-object) + 2 new doctests;
+  **total 220 crate tests, 6 doctests**. Clippy pedantic clean, fmt clean, no_std + alloc
+  build passes.
+
+### Documented — Phase 3.1
+- ADR-012 (docs/ROADMAP.md): Cross-crate MusicIntent protocol — the 8-byte packet is the
+  single source of truth. ALICE-LOL wraps it in `IntentNode::Music` with no dep on
+  ALICE-Synth; ALICE-Synth defines the canonical layout. Bidirectional interop through the
+  8 bytes only.
+- ADR-013 (docs/ROADMAP.md): `AbcDiff` is intentionally position-based rather than LCS-based.
+  Handles the common LLM-revision case (localized in-place edits) with minimal complexity;
+  a smarter algorithm can slot in later without changing the public surface.
+- ADR-014 (docs/ROADMAP.md): `Transcriber` trait lives in ALICE-Synth but has no concrete
+  implementations here. Keeps this crate free of ML dependencies while giving downstream
+  transcribers a stable interface to target.
+
 ## [0.1.1] - 2026-03-04
 
 ### Added

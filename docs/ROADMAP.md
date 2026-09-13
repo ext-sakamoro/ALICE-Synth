@@ -131,13 +131,28 @@ Landed in the same v0.2.0-dev milestone as Phase 1b (single commit follow-up).
 - ADR-010: ambiguous sharp-count → tonic reverse lookup prefers Ionian.
 - ADR-011: procedural synthesizer is the MVP; LLM plan head is a drop-in replacement.
 
-**Still open (cross-crate work, tracked as Phase 3.1)**:
+### 🟢 Phase 3.1 — Cross-crate contract + local editing / cover APIs (v0.2.0-dev, 2026-09-13)
 
-- `AbcTune` ↔ ALICE-LOL Music IR round-trip (needs LOL repo changes)
-- Actual LLM-driven `synthesize` alternative (needs ALICE-LLM audio-token head)
-- Zero-shot cover pipeline: audio → SheetSage2-style transcription → `AbcTune` → style
-  rewrite (needs a transcription model — external crate)
-- Agentic editing: `AbcTune` diff / patch API for LLM-driven revision loops
+Landed together with the ALICE-LOL side (LOL commit `c41de9b`):
+
+- **`PlanHead` trait + `ProceduralPlanHead`** — canonical extension point for future
+  LLM-driven `synthesize` alternatives. Object-safe.
+- **`agentic` feature** — `AbcDiff::compute` / `apply` + `AbcTune::diff` / `patch`.
+  Position-based diff, header override support, extra_voices preserved.
+- **`cover` feature** — `Transcriber` trait + `TranscribeError` + `CoverPipeline<T, P>`.
+  Zero-shot cover composition (audio → transcribe → intent extract → style rewrite →
+  synthesize). Concrete transcribers live in downstream crates.
+- **ALICE-LOL side** — `IntentNode::Music { packet: [u8; 8] }` + `music_intent()` constructor.
+  No dependency between the two crates — the 8-byte packet is the entire contract.
+- ADR-012: cross-crate `MusicIntent` protocol is the 8-byte packet only.
+- ADR-013: `AbcDiff` is intentionally position-based (LCS is Phase 4 candidate).
+- ADR-014: `Transcriber` trait lives here without concrete impls.
+
+Still open (**Phase 3.2**):
+
+- Actual LLM-driven `PlanHead` implementation (ALICE-LLM audio-token head)
+- Concrete `Transcriber` implementations (external ML crate wrapping `SheetSage2`)
+- LCS/Myers-style upgrade for `AbcDiff` (Phase 4 audio-quality parity work)
 
 ### ⏳ Phase 4 — Audio quality parity with modern models
 
@@ -318,6 +333,60 @@ audio out via `synthesize().to_score(96)` → existing `Synthesizer`. (+) Downst
 against a stable API. (+) Same packet always produces the same tune, on any host. (−) Musical
 quality is limited by the procedural rules; a rich LLM plan head will produce more
 compelling output. That is Phase 3.1 work, on ALICE-LLM's side.
+
+### ADR-012 — Cross-crate `MusicIntent` protocol is the 8-byte packet, nothing else (2026-09-13)
+
+**Context**: ALICE-LOL and ALICE-Synth both need to speak `MusicIntent`. Two options:
+
+1. Make ALICE-LOL depend on ALICE-Synth (or a shared "protocol" crate).
+2. Have both crates independently agree on the 8-byte wire layout; ALICE-LOL wraps the
+   payload as opaque `[u8; 8]` in `IntentNode::Music`, and consumers deserialize via
+   `alice_synth::intent::MusicIntent::from_bytes`.
+
+**Decision**: Option 2 (opaque 8-byte payload; zero dependency edge).
+
+**Consequences**: (+) ALICE-LOL stays MIT/Apache-2.0 pure — no need to worry about the
+AGPL propagation risks that its optional `physics` / `llm-bridge` features already carry.
+(+) The 8-byte contract is the *only* thing crates must agree on; extensions to
+`MusicIntent`'s Rust surface (methods, constants) do not ripple into LOL. (+) Other
+consumers (network protocols, embedded firmware, non-Rust languages) can produce and
+consume the packet without linking either crate. (−) Discoverability suffers: an
+ALICE-LOL user staring at `IntentNode::Music { packet: [u8; 8] }` needs a comment pointer
+to know what byte layout to write. Mitigated by the doc comment on the variant.
+
+### ADR-013 — `AbcDiff` is position-based, not LCS/Myers (2026-09-13)
+
+**Context**: LLM-driven revisions are usually localized: a phrase gets its ending changed,
+a note is transposed, a section is added at the end. Full LCS/Myers diff catches shifts
+too, at the cost of `O(N × M)` computation and much more complex output.
+
+**Decision**: Ship a position-based diff for Phase 3.1. A per-index walk records
+insertions, removals, and replacements against original body positions; unchanged
+elements produce empty entries.
+
+**Consequences**: (+) `O(max(N, M))` compute; small, predictable output structure that
+LLMs can serialize back into ABC without ambiguity. (+) Trivial to understand and audit.
+(−) Element shifts (e.g. "prepend a bar") produce a run of replacements + a tail
+insertion instead of the semantically correct "one insertion at index 0". Acceptable for
+MVP; a Phase 4 upgrade can drop in an LCS backend behind the same public surface.
+
+### ADR-014 — `Transcriber` trait lives in ALICE-Synth, concrete impls do not (2026-09-13)
+
+**Context**: The `cover` feature composes an audio → symbolic → audio pipeline, but the
+transcription stage is a hard ML problem. Two options:
+
+1. Ship a concrete `Transcriber` implementation in ALICE-Synth (would require ML deps).
+2. Ship only the `Transcriber` trait + composition; require downstream crates to provide
+   concrete implementations.
+
+**Decision**: Option 2.
+
+**Consequences**: (+) ALICE-Synth stays pure Rust + `alloc`; no `wgpu` / `pytorch` /
+`ONNX Runtime` transitive weight. (+) Downstream implementers (e.g. an eventual
+`alice-music-transcribe` crate wrapping `SheetSage2`) have a stable trait to target.
+(−) A user opting into the `cover` feature cannot immediately run a cover; they need a
+concrete transcriber. The doctest and unit tests use a `FixedTranscriber` stub to
+demonstrate the composition pattern.
 
 ### ADR-004 — Barlines emit no Score events in Phase 1 (2026-09-12)
 
