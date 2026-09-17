@@ -14,8 +14,6 @@ const TWO_PI: f32 = 2.0 * PI;
 const RCP_32768: f32 = 1.0 / 32768.0;
 
 /// Reciprocal of 12 — used in `midi_to_freq` semitone conversion
-const RCP_12: f32 = 1.0 / 12.0;
-
 /// no_std-compatible floor function
 #[inline(always)]
 fn floor_f32(x: f32) -> f32 {
@@ -170,31 +168,37 @@ pub fn sin_approx(x: f32) -> f32 {
 ///
 /// A4 (note 69) = 440 Hz
 /// `RCP_12` replaces the / 12.0 division in semitone computation.
+/// MIDI note → Hz, equal temperament `440 · 2^((note − 69)/12)`.
+///
+/// Exact to f32 rounding (< 0.01 cent): the 12 semitone ratios are constants
+/// and the octave is an exponent-field shift.  Until 2026-09-17 this used a
+/// cubic polynomial for `2^frac`, which is 0.5 % off as `frac → 1`: every
+/// note with `(note − 69) mod 12 = 11` (G♯ in every octave) came out ~7 cents
+/// flat (oracle `tests/analytic_oracle.rs`).
 #[inline(always)]
 #[must_use]
 pub fn midi_to_freq(note: u8) -> f32 {
-    440.0 * pow2_approx((note as f32 - 69.0) * RCP_12)
-}
-
-/// Fast 2^x approximation for `no_std`
-///
-/// Uses integer bit manipulation + polynomial approximation.
-#[inline(always)]
-fn pow2_approx(x: f32) -> f32 {
-    // 2^x = 2^int(x) * 2^frac(x)
-    let floor = floor_f32(x);
-    let frac = x - floor;
-    let int_part = floor as i32;
-
-    // 2^frac approximation (linear: good enough for ±6 semitones)
-    let frac_approx =
-        1.0 + frac * (core::f32::consts::LN_2 + frac * (0.240_226_5 + frac * 0.055_801_1));
-
-    // 2^int via IEEE 754 exponent field manipulation
-    let bits = ((127 + int_part) as u32) << 23;
-    let int_pow = f32::from_bits(bits);
-
-    int_pow * frac_approx
+    // 2^(k/12), k = 0..12
+    const SEMITONE: [f32; 12] = [
+        1.0,
+        1.059_463_1,
+        1.122_462,
+        1.189_207_1,
+        1.259_921_1,
+        1.334_839_9,
+        core::f32::consts::SQRT_2,
+        1.498_307_1,
+        1.587_401_1,
+        1.681_792_8,
+        1.781_797_4,
+        1.887_748_6,
+    ];
+    let d = i32::from(note) - 69;
+    let octave = d.div_euclid(12);
+    let semitone = d.rem_euclid(12) as usize;
+    // 2^octave via the IEEE 754 exponent field (octave ∈ [−6, 5] for u8 notes)
+    let scale = f32::from_bits(((127 + octave) as u32) << 23);
+    440.0 * SEMITONE[semitone] * scale
 }
 
 #[cfg(test)]
@@ -267,15 +271,6 @@ mod tests {
         assert!(
             (RCP_32768 - expected).abs() < 1e-10,
             "RCP_32768 constant incorrect"
-        );
-    }
-
-    #[test]
-    fn test_rcp_12_correctness() {
-        let expected = 1.0_f32 / 12.0;
-        assert!(
-            (RCP_12 - expected).abs() < 1e-10,
-            "RCP_12 constant incorrect"
         );
     }
 

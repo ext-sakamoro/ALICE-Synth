@@ -21,6 +21,24 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+  test:
+    name: Test + Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (all non-Python features)
+        run: cargo clippy --all-targets --features "std,abc,intent,agentic,cover,ffi" -- -D warnings
+      - name: Test (default features)
+        run: cargo test
+      - name: Test (all non-Python features)
+        run: cargo test --features "std,abc,intent,agentic,cover,ffi"
+      - name: Analytic oracle
+        run: cargo test --test analytic_oracle
+
   actionlint:
     name: actionlint (workflow YAML 検証)
     runs-on: ubuntu-latest

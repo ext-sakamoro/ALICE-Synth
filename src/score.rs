@@ -45,7 +45,10 @@ impl ScoreHeader {
         buf[0..4].copy_from_slice(&Self::MAGIC);
         buf[4..6].copy_from_slice(&self.tempo_bpm.to_le_bytes());
         buf[6] = self.tracks;
-        buf[7] = (self.tick_div / 2) as u8; // Store as half (fits u8 for common values)
+        // Stored in units of 8 ticks: every common PPQ (24 … 960) is a
+        // multiple of 8 and fits u8 (≤ 2040).  Until 2026-09-17 the unit was
+        // 2, so 960 PPQ (the MIDI default of most DAWs) truncated to 448.
+        buf[7] = (self.tick_div / 8).min(255) as u8;
         buf
     }
 
@@ -57,7 +60,7 @@ impl ScoreHeader {
         }
         let tempo_bpm = u16::from_le_bytes([data[4], data[5]]);
         let tracks = data[6];
-        let tick_div = data[7] as u16 * 2;
+        let tick_div = u16::from(data[7]) * 8;
         Some(Self {
             tempo_bpm,
             tracks,

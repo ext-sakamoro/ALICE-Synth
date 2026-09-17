@@ -423,7 +423,7 @@ mod tests {
         let handle = alice_osc_new(0); // Sine
         let sample = alice_osc_next(handle, 440.0, 1.0 / 44100.0);
         // First sample of sine at 440Hz should be a small positive value
-        assert!(sample >= -1.0 && sample <= 1.0);
+        assert!((-1.0..=1.0).contains(&sample));
         unsafe { alice_osc_free(handle) };
     }
 
@@ -434,7 +434,7 @@ mod tests {
         alice_osc_reset(handle);
         // After reset, should behave as newly created
         let sample = alice_osc_next(handle, 440.0, 1.0 / 44100.0);
-        assert!(sample >= -1.0 && sample <= 1.0);
+        assert!((-1.0..=1.0).contains(&sample));
         unsafe { alice_osc_free(handle) };
     }
 
