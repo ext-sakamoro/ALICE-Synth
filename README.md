@@ -410,7 +410,7 @@ cargo test --features intent,agentic,cover,std
 
 ## License
 
-MIT
+MIT OR Apache-2.0 (LICENSE-MIT / LICENSE-APACHE)
 
 ## Author
 

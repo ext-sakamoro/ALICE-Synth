@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2024-2026 Moroya Sakamoto
+Copyright (c) 2026 Moroya Sakamoto
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,20 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This license applies to the following MIT-licensed components:
-
-- ASP Protocol Specification
-- libasp-decoder (Rust/Wasm implementation)
-- libasp-transport (UDP/WebSocket reference)
-- libasp-encoder-core (Reference CPU implementation)
-- asp-player (Reference web player)
-
-For enterprise/commercial components, see LICENSE-COMMERCIAL.md.
-
-Attribution requirement for free encoder usage:
-If you use the MIT licensed "Encoder Core" for public broadcasting or streaming,
-you must include "Streamed via ALICE Protocol (ASP)" in stream metadata.
-This requirement is waived for Commercial License holders.
