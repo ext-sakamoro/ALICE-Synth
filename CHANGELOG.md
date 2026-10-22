@@ -4,6 +4,9 @@ All notable changes to ALICE-Synth will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- CI: `ci/**` の branch への送信でも CI を走らせる
+
 ### Fixed
 - `midi_to_freq`: exact equal temperament (12 semitone ratio constants + IEEE exponent shift) — the cubic `2^frac` approximation left every G# (`(note − 69) mod 12 = 11`) ~7 cents flat, note 8 was 6.9 cents off
 - `ScoreHeader` wire format: `tick_div` byte now stores `ppq / 8` (was `ppq / 2`, which truncated 960 PPQ to 448 through the u8); every common PPQ 24 … 960 round-trips
