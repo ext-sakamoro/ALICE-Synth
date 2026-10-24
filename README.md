@@ -410,7 +410,9 @@ cargo test --features intent,agentic,cover,std
 
 ## License
 
-MIT OR Apache-2.0 (LICENSE-MIT / LICENSE-APACHE)
+`LicenseRef-Proprietary`. The text is [LICENSE-Proprietary](LICENSE-Proprietary).
+
+Enquiries: https://extoria.co.jp/
 
 ## Author
 
