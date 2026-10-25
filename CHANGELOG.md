@@ -45,7 +45,7 @@ All notable changes to ALICE-Synth will be documented in this file.
 
 ### Changed — Phase 2a (breaking, pre-1.0)
 - `AbcElement::Note` gained a required `tie_follows: bool` field. Pattern matches must add either
-  `tie_follows` or `..`. Documented in `docs/ROADMAP.md` ADR-005.
+  `tie_follows` or `..`. Documented in `docs/DECISIONS.md` ADR-005.
 
 ### Added — Phase 2b (church modes / tuplets / grace notes / multi-voice)
 - **Church modes** — `parse_key` refactored to a tonic + mode-suffix computed table. Dor/Mix/Lyd/Phr/Loc
@@ -68,7 +68,7 @@ All notable changes to ALICE-Synth will be documented in this file.
 ### Changed — Phase 2b (additive; pattern-match compatible)
 - `AbcTune` gained the `extra_voices` field. Struct literals must include it (single-voice case:
   `extra_voices: Vec::new()`). Existing pattern matches using `AbcTune { header, body, .. }` remain
-  unaffected. Documented in `docs/ROADMAP.md` ADR-007.
+  unaffected. Documented in `docs/DECISIONS.md` ADR-007.
 
 ### Added — Phase 2c (chord tie / volta ≥ 3 / repeat shorthand)
 - **Chord tie coalescing** — `render_voice_to_absolute` refactored to a `tied_in` state machine
@@ -95,7 +95,7 @@ All notable changes to ALICE-Synth will be documented in this file.
 ### Refactored — Phase 2c (behaviourally identical)
 - `render_voice_to_absolute` moved from an ad-hoc tie-chain loop to a unified `tied_in` state
   machine. All Phase 2a Note-tie tests still pass unchanged; the new mechanism now also handles
-  chord-level ties. Documented in `docs/ROADMAP.md` ADR-009.
+  chord-level ties. Documented in `docs/DECISIONS.md` ADR-009.
 
 ### Added — Phase 3 (ALICE 三相原理 Intent packet + procedural synthesizer)
 - **`intent` feature** (`feature = "intent"`, implies `abc`) — new module `src/intent.rs`
@@ -122,9 +122,9 @@ All notable changes to ALICE-Synth will be documented in this file.
   no_std + alloc build passes.
 
 ### Documented — Phase 3
-- ADR-010 (docs/ROADMAP.md): Ambiguous key signature reverse-lookup in `from_tune` prefers
+- ADR-010 (docs/DECISIONS.md): Ambiguous key signature reverse-lookup in `from_tune` prefers
   Ionian over relative Aeolian for aesthetic simplicity.
-- ADR-011 (docs/ROADMAP.md): Procedural synthesizer is the canonical MVP; a future
+- ADR-011 (docs/DECISIONS.md): Procedural synthesizer is the canonical MVP; a future
   LLM-driven plan head can slot in as an alternate `synthesize` implementation without
   changing the `MusicIntent` wire format.
 
@@ -151,14 +151,14 @@ All notable changes to ALICE-Synth will be documented in this file.
   build passes.
 
 ### Documented — Phase 3.1
-- ADR-012 (docs/ROADMAP.md): Cross-crate MusicIntent protocol — the 8-byte packet is the
+- ADR-012 (docs/DECISIONS.md): Cross-crate MusicIntent protocol — the 8-byte packet is the
   single source of truth. ALICE-LOL wraps it in `IntentNode::Music` with no dep on
   ALICE-Synth; ALICE-Synth defines the canonical layout. Bidirectional interop through the
   8 bytes only.
-- ADR-013 (docs/ROADMAP.md): `AbcDiff` is intentionally position-based rather than LCS-based.
+- ADR-013 (docs/DECISIONS.md): `AbcDiff` is intentionally position-based rather than LCS-based.
   Handles the common LLM-revision case (localized in-place edits) with minimal complexity;
   a smarter algorithm can slot in later without changing the public surface.
-- ADR-014 (docs/ROADMAP.md): `Transcriber` trait lives in ALICE-Synth but has no concrete
+- ADR-014 (docs/DECISIONS.md): `Transcriber` trait lives in ALICE-Synth but has no concrete
   implementations here. Keeps this crate free of ML dependencies while giving downstream
   transcribers a stable interface to target.
 
@@ -175,7 +175,7 @@ All notable changes to ALICE-Synth will be documented in this file.
   choosing the trade-off (fast + coarse vs. thorough + shift-aware).
 
 ### Documented — Phase 3.2
-- ADR-015 (docs/ROADMAP.md): `compute_lcs` co-exists with `compute` rather than replacing
+- ADR-015 (docs/DECISIONS.md): `compute_lcs` co-exists with `compute` rather than replacing
   it. Callers pick per revision profile — small edits → positional (`O(N)`), structural
   edits → LCS (`O(N × M)`). Removes the "LCS is Phase 4 candidate" note from ADR-013.
 

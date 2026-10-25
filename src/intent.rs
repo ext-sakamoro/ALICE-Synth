@@ -23,7 +23,7 @@
 //! [`MusicIntent::synthesize`] produces a valid [`AbcTune`] deterministically
 //! from the packet. The current implementation is a procedural generator
 //! (`mode_scale × mood_bias × LCG PRNG`) that serves as the canonical
-//! stand-in for a future LLM-driven plan head (see `docs/ROADMAP.md`
+//! stand-in for a future LLM-driven plan head (see `docs/DECISIONS.md`
 //! ADR-011). Same packet → same tune, always, on any host.
 //!
 //! # Inverse extraction
