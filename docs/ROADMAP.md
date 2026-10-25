@@ -180,8 +180,8 @@ Still open (**Phase 3.2 continued**):
 - **OQ-3**: Feature gating strategy — keep `abc = []` (no deps) or split into `abc-core` (parser
   only, no `Score` conversion) + `abc-render` (with Score conversion, requires `std` for future
   file I/O)?
-- **OQ-4**: License positioning — should the ABC parser be dual-licensed (MIT OR Apache-2.0)
-  matching the rest of the crate, or contributed upstream to `abc-notation` community crates?
+- **OQ-4**: Placement — keep the ABC parser in this crate, or contribute it upstream to
+  `abc-notation` community crates?
 
 ## 判断記録 (ADR)
 
@@ -353,8 +353,7 @@ compelling output. That is Phase 3.1 work, on ALICE-LLM's side.
 
 **Decision**: Option 2 (opaque 8-byte payload; zero dependency edge).
 
-**Consequences**: (+) ALICE-LOL stays MIT/Apache-2.0 pure — no need to worry about the
-AGPL propagation risks that its optional `physics` / `llm-bridge` features already carry.
+**Consequences**: (+) ALICE-LOL takes no dependency edge on this crate.
 (+) The 8-byte contract is the *only* thing crates must agree on; extensions to
 `MusicIntent`'s Rust surface (methods, constants) do not ripple into LOL. (+) Other
 consumers (network protocols, embedded firmware, non-Rust languages) can produce and
