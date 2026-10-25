@@ -10,7 +10,7 @@ All notable changes to ALICE-Synth will be documented in this file.
 ### Fixed
 - `midi_to_freq`: exact equal temperament (12 semitone ratio constants + IEEE exponent shift) — the cubic `2^frac` approximation left every G# (`(note − 69) mod 12 = 11`) ~7 cents flat, note 8 was 6.9 cents off
 - `ScoreHeader` wire format: `tick_div` byte now stores `ppq / 8` (was `ppq / 2`, which truncated 960 PPQ to 448 through the u8); every common PPQ 24 … 960 round-trips
-- licence の file を Cargo.toml の宣言 `MIT OR Apache-2.0` に合わせた: LICENSE-MIT と LICENSE-APACHE (Apache-2.0 の全文) を置き、README と TRADEMARK_NOTICE もそれに合わせた
+- Licence: `MIT` → `LicenseRef-Proprietary`
 
 ### Added
 - `tests/analytic_oracle.rs` — closed-form oracles: oscillator harmonic amplitudes via an independent f64 DFT (saw 2/πn, square 4/πn odd, triangle 8/π²n² odd, sine −50 dB), Bhaskara `sin_approx` bound, equal temperament to 0.01 cent, ADSR linear ramps, one-pole low-pass |H(f)| and delay-line impulse response, score header timing + wire round trip
