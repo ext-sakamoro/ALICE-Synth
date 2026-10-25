@@ -241,7 +241,7 @@ ALICE-LOL ──── IntentNode::Music { packet: [u8; 8] } ────▶ ALI
 
 | Platform | Polyphony | Latency | Memory |
 |----------|-----------|---------|--------|
-| Raspberry Pi 5 (A76) | 128 voices | < 3ms | < 1 MB |
+| ARM64 single-board computer (Cortex-A76) | 128 voices | < 3ms | < 1 MB |
 | ESP32-S3 | 8 voices | < 10ms | < 64 KB |
 | Cortex-M4 (STM32F4) | 4 voices | < 5ms | < 32 KB |
 | RISC-V (GD32VF103) | 2 voices | < 10ms | < 16 KB |
