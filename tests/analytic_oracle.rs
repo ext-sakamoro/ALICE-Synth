@@ -1,5 +1,5 @@
 //! Analytic oracles — closed-form checks for the acoustic laws in ALICE-Synth
-//! (CLAUDE.md § 解析解突合テスト規律, 2026-09-17).
+//!.
 //!
 //! Expected values come from closed forms or an independent f64 DFT written
 //! in this file, never from the crate function under test.
